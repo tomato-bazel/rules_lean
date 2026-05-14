@@ -12,15 +12,15 @@ package(default_visibility = ["//visibility:public"])
 
 stardoc(
     name = "lean_doc",
-    input = "//lean:lean.bzl",
     out = "lean.md.generated",
+    input = "//lean:lean.bzl",
     deps = ["//lean:lean_bzl"],
 )
 
 stardoc(
     name = "lake_doc",
-    input = "//lean:lake.bzl",
     out = "lake.md.generated",
+    input = "//lean:lake.bzl",
     deps = ["//lean:lake_bzl"],
 )
 

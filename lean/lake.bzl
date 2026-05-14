@@ -105,6 +105,7 @@ def _download_lean(rctx, version, platform):
 
 def _stage_lake_workspace(rctx):
     """Stage lakefile + manifest + lean-toolchain + placeholder package source into lake_ws/."""
+
     # Use the user's actual filenames so Lake recognizes them.
     lakefile_basename = rctx.path(rctx.attr.lakefile).basename
     manifest_basename = rctx.path(rctx.attr.lake_manifest).basename
@@ -167,43 +168,43 @@ def _generate_build_file(rctx, packages):
         "",
         'package(default_visibility = ["//visibility:public"])',
         "",
-        'filegroup(',
+        "filegroup(",
         '    name = "lean_bin",',
         '    srcs = ["lean_toolchain/bin/lean"],',
-        ')',
+        ")",
         "",
-        'filegroup(',
+        "filegroup(",
         '    name = "runtime",',
-        '    srcs = glob(',
-        '        [',
+        "    srcs = glob(",
+        "        [",
         '            "lean_toolchain/bin/**",',
         '            "lean_toolchain/lib/**",',
         '            "lean_toolchain/include/**",',
-        '        ],',
-        '        allow_empty = True,',
-        '    ),',
-        ')',
+        "        ],",
+        "        allow_empty = True,",
+        "    ),",
+        ")",
         "",
-        'lean_toolchain(',
+        "lean_toolchain(",
         '    name = "lean_toolchain",',
         '    lean = ":lean_bin",',
         '    runtime = ":runtime",',
-        ')',
+        ")",
         "",
-        'toolchain(',
+        "toolchain(",
         '    name = "lean_toolchain_def",',
         '    toolchain = ":lean_toolchain",',
         '    toolchain_type = "@rules_lean//lean:toolchain_type",',
-        ')',
+        ")",
         "",
     ]
     for pkg, lib in packages:
         lines += [
-            'lean_prebuilt_library(',
+            "lean_prebuilt_library(",
             '    name = "{name}",'.format(name = pkg),
             '    srcs = glob(["{lib}/**"], allow_empty = True),'.format(lib = lib),
             '    path_marker = "{lib}/.marker",'.format(lib = lib),
-            ')',
+            ")",
             "",
         ]
     rctx.file("BUILD.bazel", "\n".join(lines))
