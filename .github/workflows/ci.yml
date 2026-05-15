@@ -58,3 +58,45 @@ jobs:
           disk-cache: ${{ github.workflow }}-lake
           repository-cache: true
       - run: bazel test //examples/batteries_smoke:smoke_test --test_output=errors
+
+  # RulesLean Lean library version compatibility. Builds lean/lib/ against
+  # multiple Lean toolchains via elan (auto-installs the version pinned in
+  # `lean-toolchain`). When this fails on a new Lean release, we know to
+  # gate the library's source on a Lean-version conditional (or bump our
+  # default toolchain).
+  #
+  # Matrix kept narrow until we have signal — expand as new stable Lean
+  # versions land.
+  ruleslean_library:
+    name: lake build lean/lib/ (Lean ${{ matrix.lean_version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        lean_version: ["4.29.1"]
+        # Add upcoming versions here once they're released:
+        #   "4.30.0", "4.31.0", etc.
+    steps:
+      - uses: actions/checkout@v4
+      - name: install elan
+        run: |
+          curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+            -sSf -o elan-init.sh
+          sh elan-init.sh -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: pin toolchain
+        working-directory: lean/lib
+        run: |
+          echo "leanprover/lean4:v${{ matrix.lean_version }}" > lean-toolchain
+          lake --version
+      - name: lake build
+        working-directory: lean/lib
+        run: lake build
+      - name: smoke the CLIs
+        working-directory: lean/lib
+        run: |
+          # Sanity: each lean_exe target's --help-style empty invocation
+          # exits with the documented 2 (usage) rather than crashing.
+          lake exe oleanImports 2>/dev/null; test $? -eq 2
+          lake exe leanClosure   2>/dev/null; test $? -eq 2
