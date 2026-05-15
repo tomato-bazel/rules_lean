@@ -6,6 +6,8 @@ each consumer to self-host a multi-gigabyte olean tarball.
 
 - **rules**: `lean_test`, `lean_emit`, `lean_prebuilt_library`, `lean_toolchain` — see [docs/lean.md](docs/lean.md).
 - **lake integration**: `lake_workspace` repository rule + `lake` module extension — see [docs/lake.md](docs/lake.md).
+- **RulesLean Lean library** (`lean/lib/`): structured introspection of `.olean` files (`RulesLean.Olean`) and Lake workspaces (`RulesLean.Workspace`). Internal helpers under `RulesLean.Internal.*` are unstable; treat them as opt-in and expect API churn between releases. See [lean/lib/RulesLean.lean](lean/lib/RulesLean.lean) for the entry-point doc.
+- **lake_imports_manifest** target: when `lake_workspace` materializes, it builds the RulesLean library + `oleanImports` CLI and runs it over every olean in the workspace. Result lands at `@<your-lake-deps>//:lake_imports_manifest` — a TSV of `<path>\t<imported-module>` edges (~5MB / 42k edges for full mathlib). Downstream consumers can use it for import-graph analysis, tree-shaking, dead-code detection.
 
 ## Install
 
@@ -19,7 +21,7 @@ common --registry=https://bcr.bazel.build/
 In your `MODULE.bazel`:
 
 ```python
-bazel_dep(name = "rules_lean", version = "0.2.0")
+bazel_dep(name = "rules_lean", version = "0.3.0-rc1")
 
 lake = use_extension("@rules_lean//lean:lake.bzl", "lake")
 lake.workspace(

@@ -293,6 +293,7 @@ def _build_ruleslean_library(rctx, env):
     Cost: ~3-5s cold per lake_workspace materialization. The cached `.lake/build/`
     persists across builds.
     """
+
     # The library lives at @rules_lean//lean/lib/. We need the whole directory;
     # rctx.path() on the lakefile gives us a starting point, then copy the tree.
     lakefile_path = rctx.path(Label("@rules_lean//lean/lib:lakefile.lean"))
