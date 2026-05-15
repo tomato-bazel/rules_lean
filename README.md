@@ -12,7 +12,7 @@ each consumer to self-host a multi-gigabyte olean tarball.
 Add the registry to your `.bazelrc`:
 
 ```
-common --registry=https://raw.githubusercontent.com/mattmarshall/bazel-registry/main/
+common --registry=https://raw.githubusercontent.com/fastverk/bazel-registry/main/
 common --registry=https://bcr.bazel.build/
 ```
 
