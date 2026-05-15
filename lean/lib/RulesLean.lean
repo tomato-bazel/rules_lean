@@ -1,3 +1,4 @@
+import RulesLean.Internal
 import RulesLean.Olean
 import RulesLean.Workspace
 
