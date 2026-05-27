@@ -1,0 +1,14 @@
+load("@rules_lean//lean:lean.bzl", "lean_regen_test")
+
+# Smoke for `lean_regen_test`. Validates the full pipeline:
+#   1. lean_emit runs Hello.lean via the registered Lean toolchain.
+#   2. Captures `IO.println "hello from lean_regen_test"` to stdout.
+#   3. diff_test compares the captured stdout (with trailing newline)
+#      against the committed expected.txt.
+# Fails if the committed expected drifts from what Hello.lean emits.
+lean_regen_test(
+    name = "regen_smoke",
+    srcs = ["Hello.lean"],
+    entry = "Hello.lean",
+    expected = "expected.txt",
+)

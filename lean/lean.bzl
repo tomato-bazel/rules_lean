@@ -26,6 +26,11 @@ incremental type-checking; the value of fine-grained Bazel actions is not
 worth the staging-tree complexity at small-to-medium scale.
 """
 
+# Used by `lean_regen_test` (see bottom of this file) — kept up here
+# to satisfy Bazel's "all load()s before any other top-level statement"
+# rule.
+load("@bazel_skylib//rules:diff_test.bzl", _diff_test = "diff_test")
+
 LeanToolchainInfo = provider(
     doc = "Lean 4 compiler binary + runtime tree.",
     fields = {
@@ -330,3 +335,72 @@ lean_emit = rule(
     },
     toolchains = ["@rules_lean//lean:toolchain_type"],
 )
+
+# =============================================================================
+# lean_regen_test: assert a committed file matches the current
+# `lean_emit` output for a given Lean main. Captures the "Lean spec is
+# the source of truth; the committed Rust/C/whatever was emitted from
+# it" idiom that consumers like rules_postgres' Pg.Ir cluster gates
+# build their `Gate 1 — regen idempotence` checks on.
+#
+# Expands to a `lean_emit` (running Lean as a sandboxed Bazel action +
+# capturing stdout) plus a skylib `diff_test` (byte-exact comparison
+# against the committed `expected` label). Fails the build whenever
+# the committed file has drifted from what the Lean source-of-truth
+# currently emits — exactly the failure mode `Lean spec edited, regen
+# forgotten` introduces.
+#
+# Usage:
+#
+#   load("@rules_lean//lean:lean.bzl", "lean_regen_test")
+#
+#   lean_regen_test(
+#       name = "regen_int_arith",                # diff_test target name
+#       srcs = [...],                            # ordered .lean deps
+#       entry = "Pg/Ir/Emit/IntArith.lean",      # has `main : IO Unit`
+#       expected = "//rust/pg_int4_arith:lib_rs",
+#   )
+#
+# `bazel test //path:regen_int_arith` fails with the diff if the Lean
+# emit and `expected` disagree.
+# =============================================================================
+def lean_regen_test(name, srcs, entry, expected, out = None, deps = None, tags = None):
+    """Assert a committed file matches the current `lean_emit` output.
+
+    Args:
+      name: target name for the generated diff_test (e.g.
+        `regen_int_arith`). The helper `lean_emit` is named
+        `<name>_emit`.
+      srcs: ordered list of `.lean` source labels needed to compile
+        the entry. Order matters — `lean_emit` compiles them
+        sequentially. Must include the entry.
+      entry: path of the entry-point `.lean` file (relative to the
+        rule's package) defining `main : IO Unit`. Stdout is captured.
+      expected: Bazel label of the committed file the lean_emit
+        output is diffed against.
+      out: optional filename for the emitted artifact (defaults to
+        `<name>_emit.out`).
+      deps: optional list of `LeanInfo`-providing deps for prebuilt
+        olean closures (passed through to `lean_emit`).
+      tags: optional tags propagated to the generated `diff_test`
+        target only.
+    """
+    if out == None:
+        out = name + "_emit.out"
+
+    emit_name = name + "_emit"
+
+    lean_emit(
+        name = emit_name,
+        srcs = srcs,
+        entry = entry,
+        out = out,
+        deps = deps if deps else [],
+    )
+
+    _diff_test(
+        name = name,
+        file1 = ":" + emit_name,
+        file2 = expected,
+        tags = tags if tags else [],
+    )

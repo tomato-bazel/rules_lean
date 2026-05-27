@@ -191,8 +191,8 @@
   "moduleExtensions": {
     "//lean:lake.bzl%lake": {
       "general": {
-        "bzlTransitiveDigest": "NBSgSfRqEYUxQOa5Pe7zdvepK11iAomqk0XKT9qLz+w=",
-        "usagesDigest": "G7OYB9PwLT6p1uU2c9fhAXnUQxVzfiWAS4mqxYS0I3s=",
+        "bzlTransitiveDigest": "agu9POW0H17WqI1+iN6wtCdKTciIjxzQ2gdPgL5xuTY=",
+        "usagesDigest": "jMxSgyR+j/XE6VWBhDurReAP1A4/4rOserq9VGgWhl0=",
         "recordedInputs": [],
         "generatedRepoSpecs": {
           "lake_deps_smoke": {

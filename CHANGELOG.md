@@ -4,6 +4,18 @@ All notable changes to rules_lean. The format is loosely
 [Keep a Changelog](https://keepachangelog.com/) — version headers
 mirror the published bazel-registry entries.
 
+## 0.3.2 — `lean_regen_test` macro
+
+- New `lean_regen_test(name, srcs, entry, expected, ...)` macro in
+  `lean/lean.bzl`. Wraps `lean_emit` + skylib `diff_test` to assert a
+  committed artifact matches the current Lean-emit output for a given
+  Lean main. Captures the "Lean spec is source-of-truth; emitted X
+  was generated from it" pattern that rules_postgres' Pg.Ir cluster
+  Gate 1 was building on top of `lean_emit` + `diff_test` by hand.
+- Smoke test under `examples/regen_smoke/` exercises the macro
+  end-to-end against a tiny `Hello.lean` and a committed
+  `expected.txt`.
+
 ## 0.3.1 — External-repo Lean sources
 
 - `_module_path` and `_lean_test_impl` now handle external-repo
