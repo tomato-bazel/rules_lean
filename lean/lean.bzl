@@ -451,3 +451,125 @@ def lean_regen_test(name, srcs, entry, expected, out = None, deps = None, data =
         file2 = expected,
         tags = tags if tags else [],
     )
+
+# =============================================================================
+# lean_main_test: compile + run a Lean entry as a test. Passes iff
+# the entry's `main : IO UInt32` exits 0. No expected-output diff
+# needed — exit code IS the test result.
+#
+# Use case: gates that check a Lean script self-validates (e.g.
+# round-trip stability, structural equivalence) where the script
+# already returns the right exit code. Drops the need for a
+# committed `expected.txt` fixture.
+# =============================================================================
+
+def _lean_main_test_impl(ctx):
+    tc = ctx.toolchains["@rules_lean//lean:toolchain_type"].leantc
+    name = ctx.label.name
+    pkg = ctx.label.package
+
+    rel_paths = []
+    entry_rel = None
+    for src in ctx.files.srcs:
+        rel = _module_path(src.short_path, pkg)
+        rel_paths.append((src, rel))
+        if rel == ctx.attr.entry:
+            entry_rel = rel
+
+    if entry_rel == None:
+        fail("entry %r not found among srcs (got %s)" %
+             (ctx.attr.entry, [r for (_, r) in rel_paths]))
+
+    data_paths = []
+    for d in ctx.files.data:
+        sp = d.short_path
+        if sp.startswith("../"):
+            rest = sp[len("../"):]
+            slash = rest.find("/")
+            if slash >= 0:
+                sp = rest[slash + 1:]
+        data_paths.append((d, sp))
+
+    dep_markers, dep_files = _collect_dep_lean_info(ctx.attr.deps)
+    dep_lean_path_dirs = [m.path[:m.path.rfind("/")] for m in dep_markers.to_list()]
+
+    runner = ctx.actions.declare_file(name + ".sh")
+    lines = [
+        "#!/bin/bash",
+        "set -euo pipefail",
+        "WORK=$(mktemp -d)",
+        "trap 'rm -rf \"$WORK\"' EXIT",
+        # Resolve lean binary via runfiles. RUNFILES_DIR is set by Bazel's
+        # test runner; fall back to <runner>.runfiles for local invocation.
+        'if [[ -z "${RUNFILES_DIR:-}" ]]; then RUNFILES_DIR="$0.runfiles"; fi',
+        # Find the workspace root that contains the lean binary.
+        'for cand in "$RUNFILES_DIR"/_main "$RUNFILES_DIR"/*; do',
+        '  if [[ -x "$cand/{lean}" ]]; then LEAN_BIN="$cand/{lean}"; break; fi'
+            .format(lean = tc.lean.short_path),
+        'done',
+        '[[ -n "${LEAN_BIN:-}" ]] || { echo "lean binary not found in runfiles" >&2; exit 2; }',
+    ]
+
+    # Stage srcs.
+    for src, rel in rel_paths:
+        lines += [
+            'mkdir -p "$WORK/$(dirname {rel})"'.format(rel = rel),
+            'cp "$RUNFILES_DIR"/_main/{sp} "$WORK/{rel}" 2>/dev/null || \\'.format(sp = src.short_path, rel = rel),
+            '  cp "$RUNFILES_DIR"/*/{sp} "$WORK/{rel}"'.format(sp = src.short_path, rel = rel),
+        ]
+
+    # Stage data files at their workspace-relative path.
+    for src, rel in data_paths:
+        lines += [
+            'mkdir -p "$WORK/$(dirname {rel})"'.format(rel = rel),
+            'cp "$RUNFILES_DIR"/_main/{sp} "$WORK/{rel}" 2>/dev/null || \\'.format(sp = src.short_path, rel = rel),
+            '  cp "$RUNFILES_DIR"/*/{sp} "$WORK/{rel}"'.format(sp = src.short_path, rel = rel),
+        ]
+
+    lean_path_parts = ["$WORK"] + dep_lean_path_dirs
+    lines.append('export LEAN_PATH="{}"'.format(":".join(lean_path_parts)))
+
+    # Compile + run from $WORK; exit code propagates.
+    for _, rel in rel_paths:
+        olean = rel.removesuffix(".lean") + ".olean"
+        lines.append(
+            '"$LEAN_BIN" --root="$WORK" -o "$WORK/{olean}" "$WORK/{rel}"'
+                .format(olean = olean, rel = rel),
+        )
+    lines.append('cd "$WORK" && exec "$LEAN_BIN" --root="$WORK" --run "{entry}"'.format(entry = entry_rel))
+
+    ctx.actions.write(output = runner, content = "\n".join(lines) + "\n", is_executable = True)
+
+    runfiles = ctx.runfiles(
+        files = (
+            [src for (src, _) in rel_paths] +
+            [src for (src, _) in data_paths] +
+            [tc.lean]
+        ),
+    ).merge_all([
+        ctx.runfiles(transitive_files = tc.runtime),
+        ctx.runfiles(transitive_files = dep_files),
+    ])
+    return [DefaultInfo(executable = runner, runfiles = runfiles)]
+
+lean_main_test = rule(
+    implementation = _lean_main_test_impl,
+    test = True,
+    attrs = {
+        "srcs": attr.label_list(
+            allow_files = [".lean"],
+            mandatory = True,
+            doc = "All .lean files needed to compile the entry. Order matters.",
+        ),
+        "entry": attr.string(
+            mandatory = True,
+            doc = "Path of the entry-point .lean file (relative to the package) defining `main : IO UInt32` (test result = exit code).",
+        ),
+        "deps": attr.label_list(providers = [LeanInfo]),
+        "data": attr.label_list(
+            allow_files = True,
+            doc = "Non-Lean files staged at their workspace-relative path in the action's work directory. The Lean entry runs from that directory, so it can `IO.FS.readFile` them.",
+        ),
+    },
+    toolchains = ["@rules_lean//lean:toolchain_type"],
+)

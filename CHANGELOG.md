@@ -4,6 +4,22 @@ All notable changes to rules_lean. The format is loosely
 [Keep a Changelog](https://keepachangelog.com/) — version headers
 mirror the published bazel-registry entries.
 
+## 0.3.5 — `lean_main_test` rule
+
+- New `lean_main_test(name, srcs, entry, deps, data)` rule in
+  `lean/lean.bzl`. Compiles + runs a Lean entry whose
+  `main : IO UInt32` returns the test result via its exit code
+  (0 = pass, non-zero = fail). No expected-output diff required —
+  use when the Lean script self-validates (round-trip stability,
+  structural equivalence) and you'd otherwise need a committed
+  `expected.txt` fixture just to flag drift. Accepts the same
+  `deps` (LeanInfo) + `data` (workspace-relative staging) attrs
+  as `lean_emit` / `lean_regen_test`.
+- New smoke `examples/regen_smoke/regen_smoke_exit` runs
+  `ExitZero.lean` (`pure 0`) to exercise the happy path. A
+  companion `ExitOne.lean` (`pure 1`) is committed for manual
+  negative testing.
+
 ## 0.3.4 — `lean_emit.data` accepts external-repo files
 
 - `lean_emit.data` now stages files at their workspace-relative path

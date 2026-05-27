@@ -1,4 +1,4 @@
-load("@rules_lean//lean:lean.bzl", "lean_regen_test")
+load("@rules_lean//lean:lean.bzl", "lean_main_test", "lean_regen_test")
 
 # Smoke for `lean_regen_test`. Validates the full pipeline:
 #   1. lean_emit runs Hello.lean via the registered Lean toolchain.
@@ -24,4 +24,13 @@ lean_regen_test(
     entry = "EchoFixture.lean",
     data = ["fixture.txt"],
     expected = "fixture.txt",
+)
+
+# Smoke for `lean_main_test` (v0.3.5). Compiles + runs ExitZero.lean
+# whose `main : IO UInt32` returns 0. Test passes iff the Lean program
+# exits 0; non-zero exit (or compile failure) fails the test.
+lean_main_test(
+    name = "regen_smoke_exit",
+    srcs = ["ExitZero.lean"],
+    entry = "ExitZero.lean",
 )
