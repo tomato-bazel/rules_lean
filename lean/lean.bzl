@@ -277,12 +277,25 @@ def _lean_emit_impl(ctx):
 
     # `data` files: staged alongside srcs in the work dir but NOT
     # compiled. Lets the entry script open them at runtime via a
-    # package-relative path (the action runs from $WORK). Used e.g.
+    # workspace-relative path (the action runs from $WORK). Used e.g.
     # for `.dat` / `.txt` fixture inputs.
+    #
+    # External-repo data files (e.g. `@some_repo//path:file`) have
+    # short_paths like `../+canon+some_repo/path/file`. We strip the
+    # leading `../<repo>/` so the file lands under $WORK at its
+    # natural workspace-relative path. Workspace-local data uses its
+    # short_path verbatim. No package-prefix check (data files are
+    # arbitrary fixtures, not Lean modules — they don't need to live
+    # inside the rule's package).
     data_paths = []
     for d in ctx.files.data:
-        rel = _module_path(d.short_path, pkg)
-        data_paths.append((d, rel))
+        sp = d.short_path
+        if sp.startswith("../"):
+            rest = sp[len("../"):]
+            slash = rest.find("/")
+            if slash >= 0:
+                sp = rest[slash + 1:]
+        data_paths.append((d, sp))
 
     dep_markers, dep_files = _collect_dep_lean_info(ctx.attr.deps)
     dep_lean_path_dirs = [m.path[:m.path.rfind("/")] for m in dep_markers.to_list()]

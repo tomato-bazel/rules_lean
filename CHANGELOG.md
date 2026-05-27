@@ -4,6 +4,19 @@ All notable changes to rules_lean. The format is loosely
 [Keep a Changelog](https://keepachangelog.com/) — version headers
 mirror the published bazel-registry entries.
 
+## 0.3.4 — `lean_emit.data` accepts external-repo files
+
+- `lean_emit.data` now stages files at their workspace-relative path
+  (e.g. `examples/regen_smoke/fixture.txt`) instead of the package-
+  relative path the 0.3.3 release used. Externally-sourced data
+  (`@some_repo//path:file`) is staged at `path/file` — the `..//<canon>`
+  prefix in bazel's external-repo short_path is stripped. This lets
+  consumers pull fixtures directly from upstream repos
+  (e.g. `@postgres_src//:src/include/catalog/pg_namespace.dat`)
+  instead of vendoring them.
+- Smoke updated: `examples/regen_smoke/EchoFixture.lean` reads the
+  full workspace-relative path.
+
 ## 0.3.3 — `lean_emit.data` attr
 
 - `lean_emit` (and `lean_regen_test`) gain a `data` attr — non-Lean
