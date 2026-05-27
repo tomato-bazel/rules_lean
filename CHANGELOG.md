@@ -4,6 +4,16 @@ All notable changes to rules_lean. The format is loosely
 [Keep a Changelog](https://keepachangelog.com/) — version headers
 mirror the published bazel-registry entries.
 
+## 0.3.1 — External-repo Lean sources
+
+- `_module_path` and `_lean_test_impl` now handle external-repo
+  source layouts (`../<repo>+/<package>/<file>` short_paths). Lets
+  `lean_library` and `lean_test` targets in a consumer module
+  reference Lean sources from a `bazel_dep` repo without copying
+  the files into the consumer's tree. Used by rules_postgres'
+  `lean/Pg/Ir/Emit/` modules when consumed through the registry
+  rather than through a `local_path_override`.
+
 ## 0.3.0 — RulesLean Lean library + lake_imports_manifest
 
 - Promote `v0.3.0-rc1` and pin to Lean `v4.30.0-rc2` for cslib compatibility.
