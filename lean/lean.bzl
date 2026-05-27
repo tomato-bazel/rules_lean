@@ -103,7 +103,18 @@ lean_toolchain = rule(
 )
 
 def _module_path(src_short_path, package):
-    """Strip the rule's package prefix; what remains is the module-path layout."""
+    """Strip the rule's package prefix; what remains is the module-path layout.
+
+    Handles external-repo sources where Bazel produces a short_path like
+    `../<repo>+/<package>/<file>` (e.g. `../rules_postgres+/lean/Pg/Ty.lean`).
+    The `../<repo>+/` prefix is stripped first so the package check
+    behaves identically for in-repo and cross-repo sources.
+    """
+    if src_short_path.startswith("../"):
+        rest = src_short_path[len("../"):]
+        slash = rest.find("/")
+        if slash >= 0:
+            src_short_path = rest[slash + 1:]
     if not src_short_path.startswith(package + "/"):
         fail("source %s is not inside package %s" % (src_short_path, package))
     return src_short_path[len(package) + 1:]
@@ -113,6 +124,15 @@ def _lean_test_impl(ctx):
     name = ctx.label.name
     pkg = ctx.label.package
     workspace_name = ctx.workspace_name
+
+    # `ctx.label.workspace_name` is the canonical name of the *target's*
+    # repo (e.g. "rules_postgres+" for `@rules_postgres//lean:smoke_test`)
+    # or empty when the target is in the root module. When the target
+    # lives in an external module, runfiles stage the Lean tree under
+    # `${RUNFILES_DIR}/<target_repo>/<root_rel>` rather than under
+    # `_main` or the root workspace name — so the runner script needs
+    # this as an additional candidate location for WS_ROOT.
+    target_repo = ctx.label.workspace_name
 
     staged_files = []
     rel_paths = []
@@ -165,7 +185,7 @@ if [[ -z "${{RUNFILES_DIR:-}}" ]]; then
 fi
 
 WS_ROOT=""
-for cand in "${{RUNFILES_DIR}}/_main" "${{RUNFILES_DIR}}/{ws_name}"; do
+for cand in "${{RUNFILES_DIR}}/_main" "${{RUNFILES_DIR}}/{ws_name}" "${{RUNFILES_DIR}}/{target_repo}"; do
   if [[ -d "$cand/{root_rel}" ]]; then
     WS_ROOT="$cand"
     break
@@ -196,6 +216,7 @@ echo "[lean_test] root=$LEAN_ROOT entry={entry} LEAN_PATH=$LEAN_PATH" >&2
 echo "[lean_test] OK" >&2
 """.format(
             ws_name = workspace_name,
+            target_repo = target_repo or workspace_name,
             root_rel = "{}/{}_root".format(pkg, name),
             entry = entry_rel,
             lean_path = tc.lean.short_path,
