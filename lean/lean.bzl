@@ -310,6 +310,11 @@ def _lean_emit_impl(ctx):
         'LEAN_BIN="$(pwd)/{lean}"'.format(lean = tc.lean.path),
         # Same for the output target.
         'OUT_ABS="$(pwd)/{out}"'.format(out = output.path),
+        # Exec root, captured before any `cd`. Dep LEAN_PATH dirs below
+        # are exec-root-relative; the `--run` step cds into $WORK, so
+        # they must be absolutized here or Lean can't find dep oleans
+        # (mathlib etc.) at runtime.
+        'EXEC_ROOT="$(pwd)"',
     ]
 
     for src, rel in rel_paths:
@@ -320,7 +325,7 @@ def _lean_emit_impl(ctx):
         cmd_lines.append('mkdir -p "$WORK/$(dirname {rel})"'.format(rel = rel))
         cmd_lines.append('cp "{src}" "$WORK/{rel}"'.format(src = src.path, rel = rel))
 
-    lean_path_parts = ["$WORK"] + dep_lean_path_dirs
+    lean_path_parts = ["$WORK"] + ['$EXEC_ROOT/' + d for d in dep_lean_path_dirs]
     cmd_lines.append(
         'export LEAN_PATH="{}${{LEAN_PATH:+:$LEAN_PATH}}"'.format(":".join(lean_path_parts)),
     )
