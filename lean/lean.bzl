@@ -107,22 +107,31 @@ lean_toolchain = rule(
     },
 )
 
-def _module_path(src_short_path, package):
-    """Strip the rule's package prefix; what remains is the module-path layout.
+def _module_path(src_short_path, file_package):
+    """Relativize a source file against its OWN package to get its module path.
+
+    The result is used to stage the file + derive its Lean module name.
+    `file_package` is the package of the file itself (`src.owner.package`),
+    NOT the consuming rule's package. This lets a rule mix sources from
+    different packages — in particular cross-repo kernel sources like
+    `@polyglot_ast//lean:Polyglot/C/Ast.lean` (package `lean`) consumed by
+    a rule in a differently-named package (e.g. `//engine`). Both stage to
+    `Polyglot/C/Ast.lean` regardless of the consumer's package.
 
     Handles external-repo sources where Bazel produces a short_path like
-    `../<repo>+/<package>/<file>` (e.g. `../rules_postgres+/lean/Pg/Ty.lean`).
-    The `../<repo>+/` prefix is stripped first so the package check
-    behaves identically for in-repo and cross-repo sources.
+    `../<repo>+/<package>/<file>`; the `../<repo>+/` prefix is stripped
+    first, leaving `<package>/<file>` which is then package-relativized.
     """
     if src_short_path.startswith("../"):
         rest = src_short_path[len("../"):]
         slash = rest.find("/")
         if slash >= 0:
             src_short_path = rest[slash + 1:]
-    if not src_short_path.startswith(package + "/"):
-        fail("source %s is not inside package %s" % (src_short_path, package))
-    return src_short_path[len(package) + 1:]
+    if file_package == "":
+        return src_short_path
+    if not src_short_path.startswith(file_package + "/"):
+        fail("source %s is not inside its package %s" % (src_short_path, file_package))
+    return src_short_path[len(file_package) + 1:]
 
 def _lean_test_impl(ctx):
     tc = ctx.toolchains["@rules_lean//lean:toolchain_type"].leantc
@@ -143,7 +152,7 @@ def _lean_test_impl(ctx):
     rel_paths = []
     entry_rel = None
     for src in ctx.files.srcs:
-        rel = _module_path(src.short_path, pkg)
+        rel = _module_path(src.short_path, src.owner.package)
         staged = ctx.actions.declare_file("{}_root/{}".format(name, rel))
         ctx.actions.symlink(output = staged, target_file = src)
         staged_files.append(staged)
@@ -266,7 +275,7 @@ def _lean_emit_impl(ctx):
     rel_paths = []
     entry_rel = None
     for src in ctx.files.srcs:
-        rel = _module_path(src.short_path, pkg)
+        rel = _module_path(src.short_path, src.owner.package)
         rel_paths.append((src, rel))
         if rel == ctx.attr.entry:
             entry_rel = rel
@@ -476,7 +485,7 @@ def _lean_main_test_impl(ctx):
     rel_paths = []
     entry_rel = None
     for src in ctx.files.srcs:
-        rel = _module_path(src.short_path, pkg)
+        rel = _module_path(src.short_path, src.owner.package)
         rel_paths.append((src, rel))
         if rel == ctx.attr.entry:
             entry_rel = rel
