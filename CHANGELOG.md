@@ -4,6 +4,38 @@ All notable changes to rules_lean. The format is loosely
 [Keep a Changelog](https://keepachangelog.com/) — version headers
 mirror the published bazel-registry entries.
 
+## 0.4.0 — compiled libraries + cross-repo olean artifacts
+
+- New `lean_library`: compiles `.lean` sources to a persistent `.olean`
+  import-root tree (build outputs) and exposes it as `LeanInfo`, so one module
+  can be a **compiled** dependency of another (no source re-share, no
+  recompile). `DefaultInfo` carries the library's own tree; `LeanInfo` carries
+  the transitive closure (own + deps).
+- New `lean_olean_archive`: bundles a `lean_library`'s own `.olean` tree into a
+  tarball — the deployable cross-repo release artifact.
+- New `lean_imported_library`: exposes an unpacked `.olean` tarball (e.g. from
+  an `http_archive` of a release asset) as `LeanInfo` with no recompile — the
+  consume side. Shares the `lean_prebuilt_library` implementation.
+- These three form the cross-repo compiled-olean seam (split a monolithic Lean
+  library into modules that publish/consume prebuilt oleans). `.olean` is
+  neither Lean-version- nor architecture-portable, so artifacts are built
+  per-`(lean-version, os, arch)` and consumers pin the matching toolchain;
+  Lean rejects a mismatched olean loudly at use.
+- Round-trip example under `examples/olean_roundtrip/`.
+- **Cross-namespace deps.** A `lean_library` dep that shares the consumer's
+  top-level namespace (e.g. two libs both under `Aion/`) is staged into the
+  single compile root, since Lean commits to the first `LEAN_PATH` root owning a
+  namespace and won't fall through to siblings. Disjoint deps (Mathlib, …) stay
+  on `LEAN_PATH`, uncopied. This makes `lean_library`→`lean_library` deps within
+  one namespace work (the basis for splitting a monolith in place).
+- **Shell-free compile.** All four rules (`lean_library`, `lean_test`,
+  `lean_emit`, `lean_main_test`) now drive the compiler through a self-contained
+  Lean topo-compile driver (`lean/private/topo_compile.lean`, invoked
+  `lean --run …` via `ctx.actions.run`) instead of a `run_shell` `tsort`
+  pipeline — staging/copying uses native `IO.FS`; the only subprocess is `lean`.
+  `lean_test`/`lean_main_test` now type-check / run at build time (a failure
+  fails the build); their test executable is a trivial pass.
+
 ## 0.3.9 — import-topological compile order (`glob()`-safe srcs)
 
 - `lean_test`, `lean_emit`, and `lean_main_test` now compile their

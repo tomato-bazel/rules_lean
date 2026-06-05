@@ -1,6 +1,6 @@
 """Bazel rules for Lean 4.
 
-Four user-facing rules:
+User-facing rules:
   lean_toolchain         — registers a Lean compiler binary + runtime tree.
                            Normally produced by `lake_workspace` (see lake.bzl);
                            can also be declared by hand against a hermetic
@@ -9,6 +9,16 @@ Four user-facing rules:
                            LeanInfo provider consumable via the `deps` attr.
                            The `path_marker` file's parent directory becomes
                            the LEAN_PATH entry.
+  lean_library           — compile a set of .lean sources to a persistent
+                           .olean import-root tree (build outputs) and expose
+                           it as LeanInfo. Lets one module be a *compiled*
+                           dep of another (no source re-sharing). Transitive:
+                           its LeanInfo carries its deps' closure too.
+  lean_olean_archive     — bundle a lean_library's own .olean tree into a
+                           tarball — the deployable cross-repo release artifact.
+  lean_imported_library  — expose an unpacked .olean tarball (e.g. from an
+                           `http_archive` of a release asset) as LeanInfo,
+                           with NO recompile. The cross-repo consume side.
   lean_test              — stages a set of .lean sources into a module-path
                            layout and invokes the compiler on an entry point.
                            Returns 0 if all type-check, nonzero otherwise.
@@ -20,10 +30,14 @@ Four user-facing rules:
                            the source of truth for emitted artifacts (SQL,
                            TTL, Markdown). Same `deps` plumbing as lean_test.
 
-Design choice: one bundled lean_test per package rather than a per-file
-lean_library + transitive .olean tracking. Lean already does fast
-incremental type-checking; the value of fine-grained Bazel actions is not
-worth the staging-tree complexity at small-to-medium scale.
+`lean_library`/`lean_olean_archive`/`lean_imported_library` (added 0.4.0) are
+the cross-repo compiled-artifact seam: split a monolithic Lean library into
+modules, publish each module's `.olean` tree as a per-`(lean-version, os, arch)`
+release tarball, and have downstreams consume the prebuilt oleans without
+recompiling. `.olean` is neither Lean-version- nor architecture-portable (it is
+a compacted heap image), so a consumer must pin the SAME `lean-toolchain` and
+`select()` the matching-platform artifact; Lean itself rejects a mismatched
+olean loudly at use.
 """
 
 # Used by `lean_regen_test` (see bottom of this file) — kept up here
@@ -86,6 +100,28 @@ def _collect_dep_lean_info(deps):
         files.append(info.files)
     return depset(transitive = markers), depset(transitive = files)
 
+def _dep_manifest_lines(dep_files, dep_marker_dirs, consumer_tops):
+    """Topo-compile manifest lines for deps: oleans sharing one of the
+    consumer's top-level namespaces are `stage`d into the compile root (Lean
+    won't fall through LEAN_PATH roots for a namespace); disjoint deps go on
+    `leanpath` (no copy)."""
+    lines = []
+    leanpath = {}
+    for f in dep_files.to_list():
+        if not f.path.endswith(".olean"):
+            continue
+        for d in dep_marker_dirs:
+            if f.path.startswith(d + "/"):
+                drel = f.path[len(d) + 1:]
+                if drel.split("/")[0] in consumer_tops:
+                    lines.append("stage\t" + f.path + "\t" + drel)
+                else:
+                    leanpath[d] = True
+                break
+    for d in leanpath:
+        lines.append("leanpath\t" + d)
+    return lines
+
 def _lean_toolchain_impl(ctx):
     return [platform_common.ToolchainInfo(
         leantc = LeanToolchainInfo(
@@ -133,166 +169,62 @@ def _module_path(src_short_path, file_package):
         fail("source %s is not inside its package %s" % (src_short_path, file_package))
     return src_short_path[len(file_package) + 1:]
 
-# Bash helper (POSIX / bash 3.2 compatible — macOS ships bash 3.2, so no
-# associative arrays) that compiles a set of staged `.lean` files in
-# *dependency order* regardless of the order `srcs` was listed in. Lean needs a
-# module's imports already compiled to `.olean` before it, but the analysis
-# phase can't read file contents to sort — so we derive the order at execution
-# time: parse each file's `import` lines, keep only edges to modules that are
-# themselves in the set, and `tsort` the result. This makes `glob()` work in
-# `srcs` and removes the "order matters" footgun. Relies only on
-# grep/sed/cut/tsort/mktemp, consistent with the rest of these generated scripts.
-#
-# Reads `$LEAN_BIN`; takes ROOT dir, a log prefix, then the rel paths as args.
-_TOPO_COMPILE_FN = r'''__lean_topo_compile() {
-  local ROOT="$1"; local PFX="$2"; shift 2
-  local RELS=("$@")
-  local TD; TD=$(mktemp -d)
-  local MODS="$TD/mods" EDGES="$TD/edges" MAP="$TD/map"
-  : > "$MODS"; : > "$EDGES"; : > "$MAP"
-  local rel mod imp imports olean order
-  for rel in "${RELS[@]}"; do
-    mod=$(printf '%s' "$rel" | sed -E 's/\.lean$//; s#/#.#g')
-    printf '%s\n' "$mod" >> "$MODS"
-    printf '%s\t%s\n' "$mod" "$rel" >> "$MAP"
-  done
-  for rel in "${RELS[@]}"; do
-    mod=$(printf '%s' "$rel" | sed -E 's/\.lean$//; s#/#.#g')
-    # Edge from a sentinel so isolated nodes (no in-set imports) still appear.
-    printf '@@leanroot@@ %s\n' "$mod" >> "$EDGES"
-    imports=$(grep -E '^import[[:space:]]' "$ROOT/$rel" 2>/dev/null | sed -E 's/^import[[:space:]]+([A-Za-z0-9_.]+).*/\1/' || true)
-    for imp in $imports; do
-      if grep -qxF "$imp" "$MODS"; then printf '%s %s\n' "$imp" "$mod" >> "$EDGES"; fi
-    done
-  done
-  order=$(tsort "$EDGES") || { echo "ERROR: import cycle among Lean srcs ($PFX)" >&2; rm -rf "$TD"; exit 3; }
-  for mod in $order; do
-    [ "$mod" = "@@leanroot@@" ] && continue
-    rel=$(grep -F "$(printf '%s\t' "$mod")" "$MAP" | head -1 | cut -f2-)
-    olean="${rel%.lean}.olean"
-    echo "[$PFX] lean --root=$ROOT -o $olean $rel" >&2
-    "$LEAN_BIN" --root="$ROOT" -o "$ROOT/$olean" "$ROOT/$rel"
-  done
-  rm -rf "$TD"
-}'''
-
-def _topo_compile_block(root_expr, log_prefix, rels):
-    """Function definition + an invocation compiling `rels` under `root_expr` in
-    import-topological order. `rels` are package-relative `.lean` paths."""
-    args = " ".join(['"{}"'.format(r) for r in rels])
-    return '{fn}\n__lean_topo_compile "{root}" "{pfx}" {args}'.format(
-        fn = _TOPO_COMPILE_FN,
-        root = root_expr,
-        pfx = log_prefix,
-        args = args,
-    )
-
 def _lean_test_impl(ctx):
     tc = ctx.toolchains["@rules_lean//lean:toolchain_type"].leantc
     name = ctx.label.name
-    pkg = ctx.label.package
-    workspace_name = ctx.workspace_name
 
-    # `ctx.label.workspace_name` is the canonical name of the *target's*
-    # repo (e.g. "rules_postgres+" for `@rules_postgres//lean:smoke_test`)
-    # or empty when the target is in the root module. When the target
-    # lives in an external module, runfiles stage the Lean tree under
-    # `${RUNFILES_DIR}/<target_repo>/<root_rel>` rather than under
-    # `_main` or the root workspace name — so the runner script needs
-    # this as an additional candidate location for WS_ROOT.
-    target_repo = ctx.label.workspace_name
-
-    staged_files = []
     rel_paths = []
     entry_rel = None
+    consumer_tops = {}
     for src in ctx.files.srcs:
         rel = _module_path(src.short_path, src.owner.package)
-        staged = ctx.actions.declare_file("{}_root/{}".format(name, rel))
-        ctx.actions.symlink(output = staged, target_file = src)
-        staged_files.append(staged)
-        rel_paths.append(rel)
+        rel_paths.append((src, rel))
+        consumer_tops[rel.split("/")[0]] = True
         if rel == ctx.attr.entry:
             entry_rel = rel
 
     if entry_rel == None:
-        fail("entry %r not found among srcs (got %s)" % (ctx.attr.entry, rel_paths))
+        fail("entry %r not found among srcs (got %s)" % (ctx.attr.entry, [r for (_, r) in rel_paths]))
 
     dep_markers, dep_files = _collect_dep_lean_info(ctx.attr.deps)
-    dep_marker_short_paths = [m.short_path for m in dep_markers.to_list()]
+    dep_marker_dirs = [m.path[:m.path.rfind("/")] for m in dep_markers.to_list()]
 
-    # Compile in import-topological order (so `srcs` may be a `glob()`), not
-    # input-list order.
-    compile_lines = _topo_compile_block("$LEAN_ROOT", "lean_test", rel_paths)
+    # The type-check IS the test: compile every src (import-topological) at build
+    # time via the driver. If anything fails to type-check, the marker action
+    # fails → the test target fails to build → red. The test executable is then a
+    # trivial pass (the marker is a build prerequisite). No compile shell.
+    marker = ctx.actions.declare_file(name + ".typecheck_ok")
+    lines = [
+        "lean\t" + tc.lean.path,
+        "work\t" + name + ".topo_work",
+        "marker\t" + marker.path,
+    ]
+    for src, rel in rel_paths:
+        lines.append("stage\t" + src.path + "\t" + rel)
+        lines.append("module\t" + rel)
+    lines += _dep_manifest_lines(dep_files, dep_marker_dirs, consumer_tops)
 
-    dep_lean_path_lines = "\n".join([
-        ('dep_sp="{sp}"; ' +
-         'if [[ "$dep_sp" == "../"* ]]; then dep_abs="${{RUNFILES_DIR}}/${{dep_sp#../}}"; ' +
-         'else dep_abs="${{WS_ROOT}}/${{dep_sp}}"; fi; ' +
-         'dep_dir="$(dirname "$dep_abs")"; ' +
-         'export LEAN_PATH="$dep_dir${{LEAN_PATH:+:$LEAN_PATH}}"').format(sp = sp)
-        for sp in dep_marker_short_paths
-    ])
+    manifest = ctx.actions.declare_file(name + ".topo_manifest")
+    ctx.actions.write(output = manifest, content = "\n".join(lines) + "\n")
+    ctx.actions.run(
+        executable = tc.lean,
+        arguments = ["--run", ctx.file._driver.path, manifest.path],
+        outputs = [marker],
+        inputs = depset(
+            direct = [ctx.file._driver, manifest, tc.lean] + [s for (s, _) in rel_paths],
+            transitive = [tc.runtime, dep_files],
+        ),
+        mnemonic = "LeanTest",
+        progress_message = "Lean test %s" % name,
+    )
 
     runner = ctx.actions.declare_file(name + ".sh")
     ctx.actions.write(
         output = runner,
         is_executable = True,
-        content = """#!/bin/bash
-# Generated by lean_test.
-set -euo pipefail
-
-if [[ -z "${{RUNFILES_DIR:-}}" ]]; then
-  if [[ -d "$0.runfiles" ]]; then
-    RUNFILES_DIR="$0.runfiles"
-  fi
-fi
-
-WS_ROOT=""
-for cand in "${{RUNFILES_DIR}}/_main" "${{RUNFILES_DIR}}/{ws_name}" "${{RUNFILES_DIR}}/{target_repo}"; do
-  if [[ -d "$cand/{root_rel}" ]]; then
-    WS_ROOT="$cand"
-    break
-  fi
-done
-if [[ -z "$WS_ROOT" ]]; then
-  echo "ERROR: cannot locate staged Lean root under $RUNFILES_DIR" >&2
-  exit 2
-fi
-
-LEAN_ROOT="$WS_ROOT/{root_rel}"
-LEAN_BIN="$WS_ROOT/{lean_path}"
-[[ -x "$LEAN_BIN" ]] || LEAN_BIN="${{RUNFILES_DIR}}/{lean_path}"
-
-# Writable scratch copy: runfiles entries may be symlinks into Bazel's
-# read-only sandbox, but lean wants to write .olean alongside .lean.
-SCRATCH=$(mktemp -d)
-trap 'rm -rf "$SCRATCH"' EXIT
-cp -RL "$LEAN_ROOT/." "$SCRATCH/"
-LEAN_ROOT="$SCRATCH"
-
-export LEAN_PATH="$LEAN_ROOT${{LEAN_PATH:+:$LEAN_PATH}}"
-
-{dep_lean_path_lines}
-
-echo "[lean_test] root=$LEAN_ROOT entry={entry} LEAN_PATH=$LEAN_PATH" >&2
-{compile_lines}
-echo "[lean_test] OK" >&2
-""".format(
-            ws_name = workspace_name,
-            target_repo = target_repo or workspace_name,
-            root_rel = "{}/{}_root".format(pkg, name),
-            entry = entry_rel,
-            lean_path = tc.lean.short_path,
-            compile_lines = compile_lines,
-            dep_lean_path_lines = dep_lean_path_lines if dep_marker_short_paths else "# (no deps)",
-        ),
+        content = "#!/bin/sh\nexit 0\n",
     )
-
-    runfiles = ctx.runfiles(files = staged_files + [tc.lean]).merge_all([
-        ctx.runfiles(transitive_files = tc.runtime),
-        ctx.runfiles(transitive_files = dep_files),
-    ])
-    return [DefaultInfo(executable = runner, runfiles = runfiles)]
+    return [DefaultInfo(executable = runner, runfiles = ctx.runfiles(files = [marker]))]
 
 lean_test = rule(
     implementation = _lean_test_impl,
@@ -309,7 +241,11 @@ lean_test = rule(
         ),
         "deps": attr.label_list(
             providers = [LeanInfo],
-            doc = "Prebuilt Lean libraries. Each dep's import root is prepended to LEAN_PATH.",
+            doc = "Prebuilt Lean libraries. Same-top-namespace deps are staged into the compile root; disjoint ones are on LEAN_PATH.",
+        ),
+        "_driver": attr.label(
+            default = "@rules_lean//lean/private:topo_compile.lean",
+            allow_single_file = True,
         ),
     },
     toolchains = ["@rules_lean//lean:toolchain_type"],
@@ -318,7 +254,6 @@ lean_test = rule(
 def _lean_emit_impl(ctx):
     tc = ctx.toolchains["@rules_lean//lean:toolchain_type"].leantc
     name = ctx.label.name
-    pkg = ctx.label.package
     output = ctx.outputs.out
 
     rel_paths = []
@@ -356,61 +291,39 @@ def _lean_emit_impl(ctx):
         data_paths.append((d, sp))
 
     dep_markers, dep_files = _collect_dep_lean_info(ctx.attr.deps)
-    dep_lean_path_dirs = [m.path[:m.path.rfind("/")] for m in dep_markers.to_list()]
+    dep_marker_dirs = [m.path[:m.path.rfind("/")] for m in dep_markers.to_list()]
+    consumer_tops = {rel.split("/")[0]: True for (_, rel) in rel_paths}
 
-    cmd_lines = [
-        "set -euo pipefail",
-        "WORK=$(mktemp -d)",
-        "trap 'rm -rf \"$WORK\"' EXIT",
-        # Resolve `lean` to an absolute path BEFORE any cd. The compile
-        # / --run commands use this so the `cd "$WORK"` step below
-        # doesn't break the toolchain lookup.
-        'LEAN_BIN="$(pwd)/{lean}"'.format(lean = tc.lean.path),
-        # Same for the output target.
-        'OUT_ABS="$(pwd)/{out}"'.format(out = output.path),
-        # Exec root, captured before any `cd`. Dep LEAN_PATH dirs below
-        # are exec-root-relative; the `--run` step cds into $WORK, so
-        # they must be absolutized here or Lean can't find dep oleans
-        # (mathlib etc.) at runtime.
-        'EXEC_ROOT="$(pwd)"',
+    # Manifest: compile the srcs (topo), stage `data` (uncompiled), then `--run`
+    # the entry with its stdout captured to `out`. (See topo_compile.lean.)
+    lines = [
+        "lean\t" + tc.lean.path,
+        "work\t" + name + ".topo_work",
+        "entry\t" + entry_rel,
+        "stdout\t" + output.path,
     ]
-
     for src, rel in rel_paths:
-        cmd_lines.append('mkdir -p "$WORK/$(dirname {rel})"'.format(rel = rel))
-        cmd_lines.append('cp "{src}" "$WORK/{rel}"'.format(src = src.path, rel = rel))
-
+        lines.append("stage\t" + src.path + "\t" + rel)
+        lines.append("module\t" + rel)
     for src, rel in data_paths:
-        cmd_lines.append('mkdir -p "$WORK/$(dirname {rel})"'.format(rel = rel))
-        cmd_lines.append('cp "{src}" "$WORK/{rel}"'.format(src = src.path, rel = rel))
+        lines.append("stage\t" + src.path + "\t" + rel)
+    lines += _dep_manifest_lines(dep_files, dep_marker_dirs, consumer_tops)
 
-    lean_path_parts = ["$WORK"] + ['$EXEC_ROOT/' + d for d in dep_lean_path_dirs]
-    cmd_lines.append(
-        'export LEAN_PATH="{}${{LEAN_PATH:+:$LEAN_PATH}}"'.format(":".join(lean_path_parts)),
-    )
+    manifest = ctx.actions.declare_file(name + ".topo_manifest")
+    ctx.actions.write(output = manifest, content = "\n".join(lines) + "\n")
 
-    # Compile in import-topological order (so `srcs` may be a `glob()`).
-    cmd_lines.append(_topo_compile_block("$WORK", "lean_emit", [rel for (_, rel) in rel_paths]))
-
-    # Run from $WORK so the entry script's relative file-opens
-    # resolve to the staged `data` files.
-    cmd_lines.append(
-        '(cd "$WORK" && "$LEAN_BIN" --root="$WORK" --run "{entry}") > "$OUT_ABS"'
-            .format(entry = entry_rel),
-    )
-
-    inputs = depset(
-        direct = (
-            [src for (src, _) in rel_paths] +
-            [src for (src, _) in data_paths] +
-            [tc.lean]
-        ),
-        transitive = [tc.runtime, dep_files],
-    )
-
-    ctx.actions.run_shell(
+    ctx.actions.run(
+        executable = tc.lean,
+        arguments = ["--run", ctx.file._driver.path, manifest.path],
         outputs = [output],
-        inputs = inputs,
-        command = "\n".join(cmd_lines),
+        inputs = depset(
+            direct = (
+                [ctx.file._driver, manifest, tc.lean] +
+                [src for (src, _) in rel_paths] +
+                [src for (src, _) in data_paths]
+            ),
+            transitive = [tc.runtime, dep_files],
+        ),
         mnemonic = "LeanEmit",
         progress_message = "Lean emit %s" % name,
     )
@@ -436,6 +349,10 @@ lean_emit = rule(
         "data": attr.label_list(
             allow_files = True,
             doc = "Non-Lean files staged alongside `srcs` in the action's work directory (NOT compiled). The Lean entry runs from that directory, so it can `IO.FS.readFile` them by their package-relative path. Typical use: fixture `.dat` / `.txt` / `.json` inputs the entry processes.",
+        ),
+        "_driver": attr.label(
+            default = "@rules_lean//lean/private:topo_compile.lean",
+            allow_single_file = True,
         ),
     },
     toolchains = ["@rules_lean//lean:toolchain_type"],
@@ -525,13 +442,14 @@ def lean_regen_test(name, srcs, entry, expected, out = None, deps = None, data =
 def _lean_main_test_impl(ctx):
     tc = ctx.toolchains["@rules_lean//lean:toolchain_type"].leantc
     name = ctx.label.name
-    pkg = ctx.label.package
 
     rel_paths = []
     entry_rel = None
+    consumer_tops = {}
     for src in ctx.files.srcs:
         rel = _module_path(src.short_path, src.owner.package)
         rel_paths.append((src, rel))
+        consumer_tops[rel.split("/")[0]] = True
         if rel == ctx.attr.entry:
             entry_rel = rel
 
@@ -550,62 +468,47 @@ def _lean_main_test_impl(ctx):
         data_paths.append((d, sp))
 
     dep_markers, dep_files = _collect_dep_lean_info(ctx.attr.deps)
-    dep_lean_path_dirs = [m.path[:m.path.rfind("/")] for m in dep_markers.to_list()]
+    dep_marker_dirs = [m.path[:m.path.rfind("/")] for m in dep_markers.to_list()]
+
+    # Compile every src + `--run` the entry at build time via the driver. If the
+    # entry's `main` exits non-zero (or anything fails to compile), the action
+    # fails → the test target fails to build → red. The marker (written last)
+    # proves a clean run; the test executable is a trivial pass. No shell.
+    marker = ctx.actions.declare_file(name + ".run_ok")
+    lines = [
+        "lean\t" + tc.lean.path,
+        "work\t" + name + ".topo_work",
+        "entry\t" + entry_rel,
+        "marker\t" + marker.path,
+    ]
+    for src, rel in rel_paths:
+        lines.append("stage\t" + src.path + "\t" + rel)
+        lines.append("module\t" + rel)
+    for src, rel in data_paths:
+        lines.append("stage\t" + src.path + "\t" + rel)
+    lines += _dep_manifest_lines(dep_files, dep_marker_dirs, consumer_tops)
+
+    manifest = ctx.actions.declare_file(name + ".topo_manifest")
+    ctx.actions.write(output = manifest, content = "\n".join(lines) + "\n")
+    ctx.actions.run(
+        executable = tc.lean,
+        arguments = ["--run", ctx.file._driver.path, manifest.path],
+        outputs = [marker],
+        inputs = depset(
+            direct = (
+                [ctx.file._driver, manifest, tc.lean] +
+                [src for (src, _) in rel_paths] +
+                [src for (src, _) in data_paths]
+            ),
+            transitive = [tc.runtime, dep_files],
+        ),
+        mnemonic = "LeanMainTest",
+        progress_message = "Lean main test %s" % name,
+    )
 
     runner = ctx.actions.declare_file(name + ".sh")
-    lines = [
-        "#!/bin/bash",
-        "set -euo pipefail",
-        "WORK=$(mktemp -d)",
-        "trap 'rm -rf \"$WORK\"' EXIT",
-        # Resolve lean binary via runfiles. RUNFILES_DIR is set by Bazel's
-        # test runner; fall back to <runner>.runfiles for local invocation.
-        'if [[ -z "${RUNFILES_DIR:-}" ]]; then RUNFILES_DIR="$0.runfiles"; fi',
-        # Find the workspace root that contains the lean binary.
-        'for cand in "$RUNFILES_DIR"/_main "$RUNFILES_DIR"/*; do',
-        '  if [[ -x "$cand/{lean}" ]]; then LEAN_BIN="$cand/{lean}"; break; fi'
-            .format(lean = tc.lean.short_path),
-        'done',
-        '[[ -n "${LEAN_BIN:-}" ]] || { echo "lean binary not found in runfiles" >&2; exit 2; }',
-    ]
-
-    # Stage srcs.
-    for src, rel in rel_paths:
-        lines += [
-            'mkdir -p "$WORK/$(dirname {rel})"'.format(rel = rel),
-            'cp "$RUNFILES_DIR"/_main/{sp} "$WORK/{rel}" 2>/dev/null || \\'.format(sp = src.short_path, rel = rel),
-            '  cp "$RUNFILES_DIR"/*/{sp} "$WORK/{rel}"'.format(sp = src.short_path, rel = rel),
-        ]
-
-    # Stage data files at their workspace-relative path.
-    for src, rel in data_paths:
-        lines += [
-            'mkdir -p "$WORK/$(dirname {rel})"'.format(rel = rel),
-            'cp "$RUNFILES_DIR"/_main/{sp} "$WORK/{rel}" 2>/dev/null || \\'.format(sp = src.short_path, rel = rel),
-            '  cp "$RUNFILES_DIR"/*/{sp} "$WORK/{rel}"'.format(sp = src.short_path, rel = rel),
-        ]
-
-    lean_path_parts = ["$WORK"] + dep_lean_path_dirs
-    lines.append('export LEAN_PATH="{}"'.format(":".join(lean_path_parts)))
-
-    # Compile in import-topological order (so `srcs` may be a `glob()`), then
-    # run from $WORK; exit code propagates.
-    lines.append(_topo_compile_block("$WORK", "lean_main_test", [rel for (_, rel) in rel_paths]))
-    lines.append('cd "$WORK" && exec "$LEAN_BIN" --root="$WORK" --run "{entry}"'.format(entry = entry_rel))
-
-    ctx.actions.write(output = runner, content = "\n".join(lines) + "\n", is_executable = True)
-
-    runfiles = ctx.runfiles(
-        files = (
-            [src for (src, _) in rel_paths] +
-            [src for (src, _) in data_paths] +
-            [tc.lean]
-        ),
-    ).merge_all([
-        ctx.runfiles(transitive_files = tc.runtime),
-        ctx.runfiles(transitive_files = dep_files),
-    ])
-    return [DefaultInfo(executable = runner, runfiles = runfiles)]
+    ctx.actions.write(output = runner, is_executable = True, content = "#!/bin/sh\nexit 0\n")
+    return [DefaultInfo(executable = runner, runfiles = ctx.runfiles(files = [marker]))]
 
 lean_main_test = rule(
     implementation = _lean_main_test_impl,
@@ -625,6 +528,171 @@ lean_main_test = rule(
             allow_files = True,
             doc = "Non-Lean files staged at their workspace-relative path in the action's work directory. The Lean entry runs from that directory, so it can `IO.FS.readFile` them.",
         ),
+        "_driver": attr.label(
+            default = "@rules_lean//lean/private:topo_compile.lean",
+            allow_single_file = True,
+        ),
     },
     toolchains = ["@rules_lean//lean:toolchain_type"],
+)
+
+# =============================================================================
+# lean_library: compile .lean sources to a persistent .olean import-root tree
+# (build outputs) and expose it as LeanInfo, so one module can be a *compiled*
+# dependency of another. DefaultInfo carries only THIS library's own tree (the
+# unit a `lean_olean_archive` packages); LeanInfo carries the transitive
+# closure (own + deps) so downstream consumers list only direct deps.
+# =============================================================================
+
+_MARKER_NAME = ".lean_root"
+
+def _lean_library_impl(ctx):
+    tc = ctx.toolchains["@rules_lean//lean:toolchain_type"].leantc
+    name = ctx.label.name
+    root_dir = name + "_lib"
+
+    dep_markers, dep_files = _collect_dep_lean_info(ctx.attr.deps)
+    dep_marker_dirs = [m.path[:m.path.rfind("/")] for m in dep_markers.to_list()]
+
+    # srcs → (rel, declared .olean output); collect this lib's top-level
+    # namespaces (used to decide which deps must share the compile root).
+    units = []  # (src File, rel, olean File)
+    consumer_tops = {}
+    for src in ctx.files.srcs:
+        rel = _module_path(src.short_path, src.owner.package)
+        if not rel.endswith(".lean"):
+            fail("lean_library srcs must be .lean files; got %s" % rel)
+        consumer_tops[rel.split("/")[0]] = True
+        olean = ctx.actions.declare_file("{}/{}".format(root_dir, rel[:-len(".lean")] + ".olean"))
+        units.append((src, rel, olean))
+
+    marker = ctx.actions.declare_file("{}/{}".format(root_dir, _MARKER_NAME))
+
+    # Build the topo-compile driver manifest (see lean/private/topo_compile.lean).
+    lines = [
+        "lean\t" + tc.lean.path,
+        "work\t" + name + ".topo_work",
+        "marker\t" + marker.path,
+    ]
+    for src, rel, olean in units:
+        lines.append("stage\t" + src.path + "\t" + rel)
+        lines.append("module\t" + rel)
+        lines.append("output\t" + rel + "\t" + olean.path)
+
+    lines += _dep_manifest_lines(dep_files, dep_marker_dirs, consumer_tops)
+
+    manifest = ctx.actions.declare_file(name + ".topo_manifest")
+    ctx.actions.write(output = manifest, content = "\n".join(lines) + "\n")
+
+    own_files = [olean for (_, _, olean) in units] + [marker]
+    ctx.actions.run(
+        executable = tc.lean,
+        arguments = ["--run", ctx.file._driver.path, manifest.path],
+        outputs = own_files,
+        inputs = depset(
+            direct = [ctx.file._driver, manifest, tc.lean] + [s for (s, _, _) in units],
+            transitive = [tc.runtime, dep_files],
+        ),
+        mnemonic = "LeanLibrary",
+        progress_message = "Lean library %s" % name,
+    )
+
+    return [
+        DefaultInfo(files = depset(own_files)),
+        LeanInfo(
+            markers = depset([marker], transitive = [dep_markers]),
+            files = depset(own_files, transitive = [dep_files]),
+        ),
+    ]
+
+lean_library = rule(
+    implementation = _lean_library_impl,
+    attrs = {
+        "srcs": attr.label_list(
+            allow_files = [".lean"],
+            mandatory = True,
+            doc = "All .lean files in this library. Module path is derived from the file's path relative to its own package. Compiled in import-topological order, so list order is irrelevant (a `glob()` is fine).",
+        ),
+        "deps": attr.label_list(
+            providers = [LeanInfo],
+            doc = "Compiled Lean libraries this one imports. Same-top-namespace deps are staged into the compile root; disjoint ones are on LEAN_PATH. All propagate transitively in this library's LeanInfo.",
+        ),
+        "_driver": attr.label(
+            default = "@rules_lean//lean/private:topo_compile.lean",
+            allow_single_file = True,
+            doc = "The Lean topo-compile driver (run via `lean --run`).",
+        ),
+    },
+    toolchains = ["@rules_lean//lean:toolchain_type"],
+    doc = "Compile .lean sources to a persistent .olean import-root tree and expose it as LeanInfo.",
+)
+
+# =============================================================================
+# lean_olean_archive: tar a lean_library's OWN .olean import-root tree into a
+# deployable artifact. The tarball unpacks to an import root (`Foo/Bar.olean`,
+# `.lean_root` at top) consumable by `lean_imported_library`. One archive per
+# `(lean-version, os, arch)` — build it on each target platform (oleans are not
+# cross-compilable); the release/upload step names the asset per-platform.
+# =============================================================================
+
+def _lean_olean_archive_impl(ctx):
+    own_files = ctx.attr.library[DefaultInfo].files.to_list()
+    marker = None
+    for f in own_files:
+        if f.basename == _MARKER_NAME:
+            marker = f
+    if marker == None:
+        fail("library %s has no %s marker; is it a lean_library?" % (ctx.attr.library.label, _MARKER_NAME))
+    root = marker.dirname
+
+    out = ctx.actions.declare_file(ctx.attr.out if ctx.attr.out else (ctx.label.name + ".tar.gz"))
+
+    # `tar -C <root> .` packs the import-root contents at the tarball top.
+    # Portable across GNU and bsd tar (macOS); entries are gzip-compressed.
+    ctx.actions.run_shell(
+        outputs = [out],
+        inputs = depset(own_files),
+        command = 'tar -czf "{out}" -C "{root}" .'.format(out = out.path, root = root),
+        mnemonic = "LeanOleanArchive",
+        progress_message = "Lean olean archive %s" % ctx.label.name,
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+lean_olean_archive = rule(
+    implementation = _lean_olean_archive_impl,
+    attrs = {
+        "library": attr.label(
+            providers = [LeanInfo],
+            mandatory = True,
+            doc = "The `lean_library` whose own .olean tree is archived.",
+        ),
+        "out": attr.string(doc = "Output tarball name (default `<name>.tar.gz`)."),
+    },
+    doc = "Bundle a lean_library's .olean import-root tree into a deployable tarball.",
+)
+
+# =============================================================================
+# lean_imported_library: expose an unpacked .olean tarball (e.g. extracted by
+# an `http_archive` of a release asset) as LeanInfo, with NO recompile. This is
+# the cross-repo consume side of lean_olean_archive. Identical mechanics to
+# lean_prebuilt_library; named + documented for the import-from-release case.
+# The consumer must pin the SAME lean-toolchain version and `select()` the
+# matching-platform archive — Lean rejects a mismatched olean loudly at use.
+# =============================================================================
+
+lean_imported_library = rule(
+    implementation = _lean_prebuilt_library_impl,
+    attrs = {
+        "srcs": attr.label_list(
+            allow_files = True,
+            mandatory = True,
+            doc = "All files of the unpacked .olean tree (typically `@<archive_repo>//:all` or a `glob`).",
+        ),
+        "path_marker": attr.label(
+            allow_single_file = True,
+            mandatory = True,
+            doc = "Anchor file inside the unpacked import root (the archive's `.lean_root`). Its parent dir becomes the LEAN_PATH entry.",
+        ),
+    },
+    doc = "Expose an unpacked .olean release tarball as LeanInfo (no recompile).",
 )
