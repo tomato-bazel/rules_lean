@@ -4,6 +4,19 @@ All notable changes to rules_lean. The format is loosely
 [Keep a Changelog](https://keepachangelog.com/) — version headers
 mirror the published bazel-registry entries.
 
+## 0.5.3 — configurable prebuilt-olean cache
+
+- `lake.workspace` can now fetch a package's prebuilt oleans from a **consumer-configurable
+  cache** instead of source-building it (e.g. cslib, which Reservoir doesn't serve — a
+  ~2.6k-job compile on every cold output base). Declare `olean_cache_packages = ["cslib"]`;
+  the cache base is set via the `olean_cache` tag attr (MODULE) or the `LEAN_OLEAN_CACHE`
+  repo_env (`--repo_env=...` in .bazelrc — the repo_env wins). Never hardcoded/public.
+  Artifact path: `<base>/<pkg>-<rev12>-<leanver>-<platform>.tar.gz` (the package's
+  `.lake/build` tree). No base configured → source-build fallback (allow_source_build).
+- Each resolved package now also exposes a `:<pkg>_build_tree` filegroup, so producing the
+  cache tarball is a hermetic `pkg_tar` over it (no manual host `tar` / AppleDouble cruft).
+- Validated: with the cache set, cslib is fetched + unpacked (0 source-build jobs), green.
+
 ## 0.5.2 — shared Lean toolchain (dedup)
 
 - The `lake` module extension now extracts the Lean toolchain **once per version**

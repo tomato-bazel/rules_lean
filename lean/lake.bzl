@@ -250,6 +250,15 @@ def _generate_build_file(rctx, packages):
             '    path_marker = "{lib}/.marker",'.format(lib = lib),
             ")",
             "",
+            # The package's full `.lake/build` tree, for PUBLISHING prebuilt oleans to an
+            # olean cache: `pkg_tar(srcs=["@<ws>//:{pkg}_build_tree"], strip_prefix=...)`
+            # produces the hermetic <pkg>-<rev>-<lean>-<platform>.tar.gz the fetch path
+            # (LEAN_OLEAN_CACHE) consumes. One-time per (rev, lean, platform).
+            "filegroup(",
+            '    name = "{name}_build_tree",'.format(name = pkg),
+            '    srcs = glob(["lake_ws/.lake/packages/{p}/.lake/build/**"], allow_empty = True),'.format(p = pkg),
+            ")",
+            "",
         ]
 
     # Exposes the module-level imports manifest produced by RulesLean's
@@ -291,6 +300,58 @@ def _generate_build_file(rctx, packages):
         "]",
         "",
     ]))
+
+def _read_manifest_revs(rctx):
+    """Map lower-cased Lake package name -> git rev, from the lake-manifest.json."""
+    revs = {}
+    data = json.decode(rctx.read(rctx.path(rctx.attr.lake_manifest)))
+    for pkg in data.get("packages", []):
+        name = pkg.get("name", "")
+        rev = pkg.get("rev", "")
+        if name and rev:
+            revs[name.lower()] = rev
+    return revs
+
+def _fetch_prebuilt_oleans(rctx):
+    """Fetch prebuilt oleans for configured packages from an internal cache.
+
+    For packages with no upstream cache (e.g. cslib — Reservoir only serves mathlib),
+    fetch a prebuilt `.lake/build` tarball instead of source-building (`lake build`,
+    which is slow — cslib is ~2.6k jobs). The cache base is consumer-configurable, never
+    hardcoded/public: the `LEAN_OLEAN_CACHE` repo_env (set via `--repo_env=...` in
+    .bazelrc — "bazel config") takes precedence, else the `olean_cache` tag attr (set in
+    the MODULE). Artifact path convention (so the publish side and this fetch agree):
+
+        <base>/<package>-<rev12>-<leanversion>-<platform>.tar.gz
+
+    where the tarball is the package's `.lake/build` tree. No base configured → skip
+    (source-build handles it).
+    """
+    base = rctx.getenv("LEAN_OLEAN_CACHE", rctx.attr.olean_cache)
+    if not base or not rctx.attr.olean_cache_packages:
+        return
+    base = base.rstrip("/")
+    platform = _detect_platform(rctx)
+    leanver = _parse_lean_toolchain(rctx.read(rctx.path(rctx.attr.lean_toolchain))).lstrip("v")
+    revs = _read_manifest_revs(rctx)
+    for pkg in rctx.attr.olean_cache_packages:
+        rev = revs.get(pkg.lower(), "")
+        if not rev:
+            fail("rules_lean: olean_cache package %r not found in the lake-manifest." % pkg)
+        url = "{base}/{pkg}-{rev}-{lean}-{plat}.tar.gz".format(
+            base = base,
+            pkg = pkg,
+            rev = rev[:12],
+            lean = leanver,
+            plat = platform,
+        )
+
+        # Tarball = the package's `.lake/build` tree, so it unpacks straight back to
+        # where `lake build` would have produced it; the source-build loop then skips it.
+        rctx.download_and_extract(
+            url = url,
+            output = "lake_ws/.lake/packages/{p}/.lake".format(p = pkg),
+        )
 
 def _lake_workspace_impl(rctx):
     # Use the shared Lean toolchain (extracted once by the `@<lean_dist>` repo the
@@ -335,10 +396,14 @@ def _lake_workspace_impl(rctx):
                  "to `lake build` (slow).\nstdout:\n%s\nstderr:\n%s" %
                  (cache.stdout, cache.stderr))
 
-    # For any package whose oleans aren't yet on disk (no mathlib cache hit, or
-    # non-mathlib workspace), source-build via `lake build <pkg>`. Skipped
-    # unless allow_source_build (slow); otherwise the missing-oleans state will
-    # surface as a clear error when lean_test/lean_emit can't find imports.
+    # Prebuilt-olean cache (consumer-configurable): fetch oleans for packages with no
+    # upstream cache (e.g. cslib) instead of source-building them below.
+    _fetch_prebuilt_oleans(rctx)
+
+    # For any package whose oleans aren't yet on disk (no mathlib cache hit, no
+    # prebuilt-olean cache, or non-mathlib workspace), source-build via `lake build
+    # <pkg>`. Skipped unless allow_source_build (slow); otherwise the missing-oleans
+    # state will surface as a clear error when lean_test/lean_emit can't find imports.
     if rctx.attr.allow_source_build:
         for pkg in packages:
             lib = "lake_ws/.lake/packages/{p}/.lake/build/lib/lean".format(p = pkg)
@@ -467,6 +532,18 @@ lake_workspace = repository_rule(
                   "(mathlib from source is ~30 min); fast and necessary for custom " +
                   "Lake deps that have no upstream cache.",
         ),
+        "olean_cache": attr.string(
+            default = "",
+            doc = "Base URL/path for prebuilt-olean tarballs (a private cache — never " +
+                  "public by default). The LEAN_OLEAN_CACHE repo_env overrides it. Empty " +
+                  "→ packages without an upstream cache fall back to source build.",
+        ),
+        "olean_cache_packages": attr.string_list(
+            default = [],
+            doc = "Lake packages to fetch from the olean cache instead of source-building " +
+                  "(e.g. [\"cslib\"]). Needs a configured cache base; artifact path is " +
+                  "<base>/<pkg>-<rev12>-<leanver>-<platform>.tar.gz (the .lake/build tree).",
+        ),
         # Wired by the lake extension to the shared @lean_dist repo for this version,
         # so the workspace reuses one toolchain extraction instead of its own copy.
         "lean_dist_lake": attr.label(
@@ -511,6 +588,8 @@ def _lake_extension_impl(mctx):
             lakefile = tag.lakefile,
             lake_manifest = tag.lake_manifest,
             allow_source_build = tag.allow_source_build,
+            olean_cache = tag.olean_cache,
+            olean_cache_packages = tag.olean_cache_packages,
             lean_dist_lake = "@%s//:lean_toolchain/bin/lake" % dist,
             lean_dist_toolchain = "@%s//:lean_toolchain" % dist,
         )
@@ -521,6 +600,15 @@ _workspace_tag = tag_class(attrs = {
     "lakefile": attr.label(mandatory = True),
     "lake_manifest": attr.label(mandatory = True),
     "allow_source_build": attr.bool(default = False),
+    "olean_cache": attr.string(
+        default = "",
+        doc = "Base URL/path for prebuilt-olean tarballs (private; overridden by the " +
+              "LEAN_OLEAN_CACHE repo_env). Empty → source-build packages with no cache.",
+    ),
+    "olean_cache_packages": attr.string_list(
+        default = [],
+        doc = "Lake packages to fetch from the olean cache instead of building.",
+    ),
 })
 
 lake = module_extension(
