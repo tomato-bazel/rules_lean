@@ -4,6 +4,19 @@ All notable changes to rules_lean. The format is loosely
 [Keep a Changelog](https://keepachangelog.com/) — version headers
 mirror the published bazel-registry entries.
 
+## 0.5.2 — shared Lean toolchain (dedup)
+
+- The `lake` module extension now extracts the Lean toolchain **once per version**
+  into a shared `lean_dist` repo; every `lake.workspace` symlinks it instead of
+  extracting its own ~2.5G copy. Previously N workspaces (e.g. a project plus the
+  lake workspaces of `rules_lang` / `rules_postgres` / `rules_spec`) each carried a
+  full toolchain — 4× the same toolchain ≈ 10G **per output base**, the dominant
+  cause of multi-GB Lean checkouts / CI ENOSPC. Now 1× per version.
+- Backward-compatible: `@<ws>//:lean_toolchain_def` is still a real `toolchain()`
+  (so `register_toolchains(...)` is unchanged) — it now points at the shared
+  `lean_dist` toolchain; `@<ws>//:lean_toolchain` is an alias to it. The per-package
+  `lean_prebuilt_library` targets and the imports manifest are unchanged.
+
 ## 0.4.0 — compiled libraries + cross-repo olean artifacts
 
 - New `lean_library`: compiles `.lean` sources to a persistent `.olean`

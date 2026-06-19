@@ -103,6 +103,64 @@ def _download_lean(rctx, version, platform):
         stripPrefix = asset.removesuffix(".zip"),
     )
 
+# ── Shared Lean toolchain distribution ────────────────────────────────────────
+# A standalone repo that extracts the Lean toolchain ONCE per (version, platform).
+# Every `lake.workspace` then references this instead of extracting its own 2.5G
+# copy — the lake extension creates one `lean_dist` per distinct lean-toolchain
+# version and wires each workspace to it. Without this, N lake.workspace tags ×
+# M output bases each carry a full toolchain (the source of the multi-GB blowup).
+_DIST_BUILD = '''\
+load("@rules_lean//lean:lean.bzl", "lean_toolchain")
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(name = "lean_bin", srcs = ["lean_toolchain/bin/lean"])
+
+filegroup(
+    name = "runtime",
+    srcs = glob(
+        [
+            "lean_toolchain/bin/**",
+            "lean_toolchain/lib/**",
+            "lean_toolchain/include/**",
+        ],
+        allow_empty = True,
+    ),
+)
+
+lean_toolchain(
+    name = "lean_toolchain",
+    lean = ":lean_bin",
+    runtime = ":runtime",
+)
+
+toolchain(
+    name = "lean_toolchain_def",
+    toolchain = ":lean_toolchain",
+    toolchain_type = "@rules_lean//lean:toolchain_type",
+)
+
+# Lake binary, exposed so each lake.workspace can find it (fetch-time `lake` runs)
+# without owning a toolchain copy.
+exports_files(["lean_toolchain/bin/lake"])
+'''
+
+def _lean_dist_impl(rctx):
+    _download_lean(rctx, rctx.attr.version, _detect_platform(rctx))
+    rctx.file("BUILD.bazel", _DIST_BUILD)
+
+lean_dist = repository_rule(
+    implementation = _lean_dist_impl,
+    attrs = {
+        "version": attr.string(
+            mandatory = True,
+            doc = "Lean version tag (e.g. 'v4.30.0-rc2'); platform is auto-detected.",
+        ),
+    },
+    doc = "Extracts the Lean toolchain once; shared by all lake.workspace repos of " +
+          "the same version (deduplicates the multi-GB toolchain across workspaces).",
+)
+
 def _stage_lake_workspace(rctx):
     """Stage lakefile + manifest + lean-toolchain + placeholder package source into lake_ws/."""
 
@@ -164,37 +222,23 @@ def _write_package_markers(rctx, packages):
 def _generate_build_file(rctx, packages):
     """Emit a BUILD.bazel exposing the toolchain + one prebuilt_library per package."""
     lines = [
-        'load("@rules_lean//lean:lean.bzl", "lean_prebuilt_library", "lean_toolchain")',
+        'load("@rules_lean//lean:lean.bzl", "lean_prebuilt_library")',
         "",
         'package(default_visibility = ["//visibility:public"])',
         "",
-        "filegroup(",
-        '    name = "lean_bin",',
-        '    srcs = ["lean_toolchain/bin/lean"],',
-        ")",
-        "",
-        "filegroup(",
-        '    name = "runtime",',
-        "    srcs = glob(",
-        "        [",
-        '            "lean_toolchain/bin/**",',
-        '            "lean_toolchain/lib/**",',
-        '            "lean_toolchain/include/**",',
-        "        ],",
-        "        allow_empty = True,",
-        "    ),",
-        ")",
-        "",
-        "lean_toolchain(",
-        '    name = "lean_toolchain",',
-        '    lean = ":lean_bin",',
-        '    runtime = ":runtime",',
-        ")",
-        "",
+        "# The Lean toolchain itself lives in the shared @lean_dist repo (one extraction",
+        "# per version, deduplicated across every lake.workspace). Re-declare the",
+        "# `toolchain()` here (a real target, so `register_toolchains(\"@<ws>//:",
+        "# lean_toolchain_def\")` keeps working) pointing at the shared lean_toolchain rule.",
         "toolchain(",
         '    name = "lean_toolchain_def",',
-        '    toolchain = ":lean_toolchain",',
+        '    toolchain = "{tc}",'.format(tc = str(rctx.attr.lean_dist_toolchain)),
         '    toolchain_type = "@rules_lean//lean:toolchain_type",',
+        ")",
+        "",
+        "alias(",
+        '    name = "lean_toolchain",',
+        '    actual = "{actual}",'.format(actual = str(rctx.attr.lean_dist_toolchain)),
         ")",
         "",
     ]
@@ -249,11 +293,13 @@ def _generate_build_file(rctx, packages):
     ]))
 
 def _lake_workspace_impl(rctx):
-    platform = _detect_platform(rctx)
-    toolchain_content = rctx.read(rctx.path(rctx.attr.lean_toolchain))
-    version = _parse_lean_toolchain(toolchain_content)
-
-    _download_lean(rctx, version, platform)
+    # Use the shared Lean toolchain (extracted once by the `@<lean_dist>` repo the
+    # lake extension created for this version) instead of extracting a private 2.5G
+    # copy. Symlink it in as `lean_toolchain/` so the fetch-time `lake` runs below
+    # (which call `lean_toolchain/bin/lake`) work unchanged. lean_dist_lake points at
+    # `<dist>/lean_toolchain/bin/lake`; its grandparent is the toolchain root.
+    dist_lake = rctx.path(rctx.attr.lean_dist_lake)
+    rctx.symlink(dist_lake.dirname.dirname, "lean_toolchain")
     _stage_lake_workspace(rctx)
 
     env = _lake_env(rctx)
@@ -421,22 +467,53 @@ lake_workspace = repository_rule(
                   "(mathlib from source is ~30 min); fast and necessary for custom " +
                   "Lake deps that have no upstream cache.",
         ),
+        # Wired by the lake extension to the shared @lean_dist repo for this version,
+        # so the workspace reuses one toolchain extraction instead of its own copy.
+        "lean_dist_lake": attr.label(
+            mandatory = True,
+            doc = "The shared toolchain's `bin/lake` (for fetch-time `lake` runs).",
+        ),
+        "lean_dist_toolchain": attr.label(
+            mandatory = True,
+            doc = "The shared `lean_toolchain` rule; the workspace re-declares a " +
+                  "`toolchain()` pointing at it and aliases `:lean_toolchain` to it.",
+        ),
     },
     doc = "Materializes a Lake workspace as a Bazel external repo. " +
           "Produces `:lean_toolchain_def` + one `lean_prebuilt_library` " +
           "per resolved Lake package (target name = Lake's directory name).",
 )
 
+def _dist_name(version):
+    """Repo name for the shared toolchain of a given version (e.g. lean_dist_4_30_0_rc2)."""
+    return "lean_dist_" + version.lstrip("v").replace(".", "_").replace("-", "_")
+
 def _lake_extension_impl(mctx):
+    # First pass: discover the distinct Lean toolchain versions across all workspace
+    # tags. Create ONE shared `lean_dist` repo per version — the toolchain is then
+    # extracted once and shared, instead of a full ~2.5G copy per workspace.
+    seen_versions = {}
+    resolved = []
     for mod in mctx.modules:
         for tag in mod.tags.workspace:
-            lake_workspace(
-                name = tag.name,
-                lean_toolchain = tag.lean_toolchain,
-                lakefile = tag.lakefile,
-                lake_manifest = tag.lake_manifest,
-                allow_source_build = tag.allow_source_build,
-            )
+            version = _parse_lean_toolchain(mctx.read(mctx.path(tag.lean_toolchain)))
+            seen_versions[version] = True
+            resolved.append((tag, version))
+
+    for version in seen_versions:
+        lean_dist(name = _dist_name(version), version = version)
+
+    for tag, version in resolved:
+        dist = _dist_name(version)
+        lake_workspace(
+            name = tag.name,
+            lean_toolchain = tag.lean_toolchain,
+            lakefile = tag.lakefile,
+            lake_manifest = tag.lake_manifest,
+            allow_source_build = tag.allow_source_build,
+            lean_dist_lake = "@%s//:lean_toolchain/bin/lake" % dist,
+            lean_dist_toolchain = "@%s//:lean_toolchain" % dist,
+        )
 
 _workspace_tag = tag_class(attrs = {
     "name": attr.string(mandatory = True),
