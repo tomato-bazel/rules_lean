@@ -13,6 +13,9 @@ bzl_library(
     name = "lean_bzl",
     srcs = ["lean.bzl"],
     visibility = ["//docs:__pkg__"],
+    # lean.bzl loads @bazel_skylib//rules:diff_test.bzl; stardoc (with skylib
+    # 1.8.2) requires its bzl_library be declared for doc extraction.
+    deps = ["@bazel_skylib//rules:diff_test"],
 )
 
 bzl_library(
