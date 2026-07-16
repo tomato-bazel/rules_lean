@@ -4,6 +4,24 @@ All notable changes to rules_lean. The format is loosely
 [Keep a Changelog](https://keepachangelog.com/) — version headers
 mirror the published bazel-registry entries.
 
+## 0.5.4 — tree-shake mathlib's olean download (`cache_roots`)
+
+`lake.workspace(cache_roots = [...])` restricts mathlib's `lake exe cache get`
+to the given root modules plus their transitive closure, instead of fetching all
+of mathlib. mathlib's cache CLI already supports this (`get [ARGS]` →
+`filterByRootModules`); rules_lean simply never passed the args. The fetch stays
+sound — you cannot under-fetch a module you import.
+
+Measured against mathlib @ v4.30.0-rc2 with a Lean→SQL emitter's 6 roots
+(`Data.Fintype.Basic`, `Data.Fin.Basic`, `Data.List.Basic`, `Data.List.Infix`,
+`Order.Basic`, `Order.BoundedOrder.Basic`):
+
+  full fetch        8297 files  (~2 GB)
+  6-root closure     595 files  (52 MB)   — 93% fewer files
+
+Empty `cache_roots` (the default) keeps the fetch-everything behaviour, so
+existing workspaces are unaffected.
+
 ## 0.5.3 — configurable prebuilt-olean cache
 
 - `lake.workspace` can now fetch a package's prebuilt oleans from a **consumer-configurable

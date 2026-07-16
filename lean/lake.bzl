@@ -388,8 +388,20 @@ def _lake_workspace_impl(rctx):
     # Fast path: if mathlib is in the dep graph, run its `cache get` exe to pull
     # prebuilt oleans for mathlib + its transitive deps from the Reservoir
     # cache. For non-mathlib workspaces, this command does not exist, so skip.
+    #
+    # `cache_roots` TREE-SHAKES that download. mathlib's cache CLI takes module
+    # specs and resolves them through `filterByRootModules` to the roots plus
+    # their transitive closure, so the fetch is always sound — you cannot
+    # under-fetch something you import. With no roots it fetches EVERYTHING, which
+    # for mathlib @ v4.30.0-rc2 is 7933 modules / ~2.0 GB even when a workspace
+    # touches ~1300 of them.
     if "mathlib" in packages:
-        cache = _run_lake(rctx, ["exe", "cache", "get"], timeout = 3600, env = env)
+        cache = _run_lake(
+            rctx,
+            ["exe", "cache", "get"] + rctx.attr.cache_roots,
+            timeout = 3600,
+            env = env,
+        )
         if cache.return_code != 0 and not rctx.attr.allow_source_build:
             fail("rules_lean: `lake exe cache get` failed (cache miss for this " +
                  "mathlib rev?).\nSet `allow_source_build = True` to fall back " +
@@ -532,6 +544,25 @@ lake_workspace = repository_rule(
                   "(mathlib from source is ~30 min); fast and necessary for custom " +
                   "Lake deps that have no upstream cache.",
         ),
+        "cache_roots": attr.string_list(
+            default = [],
+            doc = "Module specs to TREE-SHAKE mathlib's olean download to — the roots " +
+                  "your workspace actually imports (e.g. [\"Mathlib.Data.List.Infix\", " +
+                  "\"Mathlib.Order.Basic\"]). Passed to `lake exe cache get <roots>`, " +
+                  "which mathlib's cache CLI resolves via `filterByRootModules` to those " +
+                  "roots PLUS their transitive closure — so the set is always sound; you " +
+                  "cannot under-fetch a module you import.\n\n" +
+                  "Empty (the default) fetches ALL of mathlib, which is what every " +
+                  "consumer did before this attr existed. That is rarely what you want: " +
+                  "measured against mathlib @ v4.30.0-rc2 (7933 modules, ~2.0 GB of " +
+                  "olean+ilean), a Lean→SQL emitter needing 6 roots pulls 1302 modules / " +
+                  "324 MB — an 84% saving. Adding a CategoryTheory + Lie-algebra lane on " +
+                  "top cost only +102 MB, so the win is in NOT fetching the other 6373 " +
+                  "modules, not in trimming what you import.\n\n" +
+                  "Specs resolve against the src search path, so `Mathlib.Data.List.Infix` " +
+                  "and `Mathlib/Data/List/Infix.lean` both work. Ignored for workspaces " +
+                  "without mathlib (their `cache` exe does not exist).",
+        ),
         "olean_cache": attr.string(
             default = "",
             doc = "Base URL/path for prebuilt-olean tarballs (a private cache — never " +
@@ -588,6 +619,7 @@ def _lake_extension_impl(mctx):
             lakefile = tag.lakefile,
             lake_manifest = tag.lake_manifest,
             allow_source_build = tag.allow_source_build,
+            cache_roots = tag.cache_roots,
             olean_cache = tag.olean_cache,
             olean_cache_packages = tag.olean_cache_packages,
             lean_dist_lake = "@%s//:lean_toolchain/bin/lake" % dist,
@@ -600,6 +632,13 @@ _workspace_tag = tag_class(attrs = {
     "lakefile": attr.label(mandatory = True),
     "lake_manifest": attr.label(mandatory = True),
     "allow_source_build": attr.bool(default = False),
+    "cache_roots": attr.string_list(
+        default = [],
+        doc = "Module specs to tree-shake mathlib's olean download to (the roots this " +
+              "workspace imports). Resolved to those roots PLUS their transitive " +
+              "closure, so the fetch cannot miss something you import. Empty → fetch " +
+              "ALL of mathlib (~2.0 GB at v4.30.0-rc2). See the repo rule's attr.",
+    ),
     "olean_cache": attr.string(
         default = "",
         doc = "Base URL/path for prebuilt-olean tarballs (private; overridden by the " +
