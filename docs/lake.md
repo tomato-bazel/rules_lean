@@ -16,11 +16,12 @@ Generated targets in `@<name>//:`:
     casing (e.g. `:mathlib`, `:batteries`, `:Cli`, `:LeanSearchClient`).
     Consumers depend on multiple packages by listing all needed names.
 
-Fast path for mathlib-based workspaces: if `.lake/packages/mathlib/` is
-present after `lake update`, the rule runs `lake exe cache get` to pull
-prebuilt oleans from the Reservoir cache (covering mathlib + its transitive
-deps). For non-mathlib packages and workspaces, `lake build` produces
-oleans from source.
+Deps are materialized from the pinned `lake-manifest.json` (never via `lake
+update` — see `_lake_workspace_impl`). Fast path for mathlib-based workspaces:
+if `.lake/packages/mathlib/` is present, the rule runs `lake exe cache get`
+(tree-shaken by `cache_roots`) to pull prebuilt oleans from the Reservoir
+cache (covering mathlib + its transitive deps). For non-mathlib packages and
+workspaces, `lake build` produces oleans from source.
 
 Use via the module extension:
 

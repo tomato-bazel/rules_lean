@@ -14,11 +14,12 @@ Generated targets in `@<name>//:`:
     casing (e.g. `:mathlib`, `:batteries`, `:Cli`, `:LeanSearchClient`).
     Consumers depend on multiple packages by listing all needed names.
 
-Fast path for mathlib-based workspaces: if `.lake/packages/mathlib/` is
-present after `lake update`, the rule runs `lake exe cache get` to pull
-prebuilt oleans from the Reservoir cache (covering mathlib + its transitive
-deps). For non-mathlib packages and workspaces, `lake build` produces
-oleans from source.
+Deps are materialized from the pinned `lake-manifest.json` (never via `lake
+update` — see `_lake_workspace_impl`). Fast path for mathlib-based workspaces:
+if `.lake/packages/mathlib/` is present, the rule runs `lake exe cache get`
+(tree-shaken by `cache_roots`) to pull prebuilt oleans from the Reservoir
+cache (covering mathlib + its transitive deps). For non-mathlib packages and
+workspaces, `lake build` produces oleans from source.
 
 Use via the module extension:
 
@@ -365,13 +366,18 @@ def _lake_workspace_impl(rctx):
 
     env = _lake_env(rctx)
 
-    # Resolve deps. Lake respects the existing lake-manifest.json if revs match
-    # the lakefile; otherwise it updates the manifest. Materializes
-    # .lake/packages/<pkg>/ as side effect.
-    update = _run_lake(rctx, ["update"], timeout = 1200, env = env)
-    if update.return_code != 0:
-        fail("rules_lean: `lake update` failed.\nstdout:\n%s\nstderr:\n%s" %
-             (update.stdout, update.stderr))
+    # Materialize deps from the PINNED lake-manifest.json: any non-update command
+    # resolves the workspace and clones each package at its manifest rev.
+    #
+    # Deliberately NOT `lake update` — do not "fix" this back. That command exists to
+    # REGENERATE the manifest we just pinned, and it fires every dep's `post_update`
+    # hook. mathlib's hook (its lakefile.lean) runs a hardcoded, UNFILTERED
+    # `lake exe cache get` — pulling all ~7900 oleans (~7G) before the tree-shaken
+    # `cache get` + cache_roots below ever gets a say, leaving it a no-op.
+    resolve = _run_lake(rctx, ["env", "true"], timeout = 1200, env = env)
+    if resolve.return_code != 0:
+        fail("rules_lean: resolving deps from lake-manifest.json (`lake env true`) " +
+             "failed.\nstdout:\n%s\nstderr:\n%s" % (resolve.stdout, resolve.stderr))
 
     packages = _list_lake_packages(rctx)
     if not packages:
