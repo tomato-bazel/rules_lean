@@ -4,6 +4,27 @@ All notable changes to rules_lean. The format is loosely
 [Keep a Changelog](https://keepachangelog.com/) — version headers
 mirror the published bazel-registry entries.
 
+## 0.5.6 — `lean_olean_archive` builds on linux
+
+`lean_olean_archive` tarred the import root directly with `tar -czhf`. The
+import root is a symlink farm into bazel-out, so `-h` reads THROUGH the links
+while bazel may still be materialising them, and GNU tar treats that as fatal:
+
+    tar: ./Aion/Db/EntityType/EntityTypeFieldPredicates.olean:
+         file changed as we read it
+
+GNU tar exits 1 on that warning; BSD tar does not. The rule therefore worked on
+macOS and failed on every linux/RBE build — invisible to local verification,
+and it took an RBE worker log to see it (observed on aion/sql, green on the same
+commit on darwin).
+
+Now the rule stages the import root into a private scratch dir with `cp -RL`,
+then tars that without `-h`. `tar` reads a tree nothing else is writing, and
+`cp` does not fail on concurrent mtime churn the way `tar` does, so the race
+cannot resurface. Both steps are portable across GNU and BSD userland.
+
+No API change; `out` and the produced tarball layout are unchanged.
+
 ## 0.5.4 — tree-shake mathlib's olean download (`cache_roots`)
 
 `lake.workspace(cache_roots = [...])` restricts mathlib's `lake exe cache get`
