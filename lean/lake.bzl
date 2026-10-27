@@ -194,6 +194,11 @@ def _lake_env(rctx):
         "PATH": "{bin}:{rest}".format(bin = bin_dir, rest = rctx.os.environ.get("PATH", "/usr/bin:/bin")),
         "LEAN_HOME": str(rctx.path("lean_toolchain")),
         "ELAN_TOOLCHAINS": "",  # discourage elan from intervening
+        # mathlib's `cache get` defaults to the user-wide ~/.cache/mathlib and
+        # rewrites a fixed `curl.cfg` and `.ltar` names there, so two workspaces
+        # fetched concurrently delete or truncate each other's files. Give each
+        # workspace its own cache.
+        "MATHLIB_CACHE_DIR": str(rctx.path("mathlib_cache")),
     }
 
 def _list_lake_packages(rctx):
