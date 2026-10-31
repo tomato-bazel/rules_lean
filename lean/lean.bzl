@@ -237,9 +237,12 @@ def _module_path(src_short_path, file_package):
         fail("source %s is not inside its package %s" % (src_short_path, file_package))
     return src_short_path[len(file_package) + 1:]
 
+# The manifest path includes configuration, repository, package, and target.
+# Keep scratch beside it so local/fallback actions cannot share staged modules.
 def _lean_test_impl(ctx):
     tc = ctx.toolchains["@rules_lean//lean:toolchain_type"].leantc
     name = ctx.label.name
+    manifest = ctx.actions.declare_file(name + ".topo_manifest")
 
     rel_paths = []
     entry_rel = None
@@ -264,7 +267,7 @@ def _lean_test_impl(ctx):
     marker = ctx.actions.declare_file(name + ".typecheck_ok")
     lines = [
         "lean\t" + tc.lean.path,
-        "work\t" + name + ".topo_work",
+        "work\t" + manifest.path + ".work",
         "marker\t" + marker.path,
     ]
     for src, rel in rel_paths:
@@ -273,7 +276,6 @@ def _lean_test_impl(ctx):
     lines.append(_forbid_sorry_line(ctx))
     lines += _dep_manifest_lines(dep_files, dep_marker_dirs, consumer_tops)
 
-    manifest = ctx.actions.declare_file(name + ".topo_manifest")
     ctx.actions.write(output = manifest, content = "\n".join(lines) + "\n")
     ctx.actions.run(
         executable = tc.lean,
@@ -324,6 +326,7 @@ lean_test = rule(
 def _lean_emit_impl(ctx):
     tc = ctx.toolchains["@rules_lean//lean:toolchain_type"].leantc
     name = ctx.label.name
+    manifest = ctx.actions.declare_file(name + ".topo_manifest")
     output = ctx.outputs.out
 
     rel_paths = []
@@ -368,7 +371,7 @@ def _lean_emit_impl(ctx):
     # the entry with its stdout captured to `out`. (See topo_compile.lean.)
     lines = [
         "lean\t" + tc.lean.path,
-        "work\t" + name + ".topo_work",
+        "work\t" + manifest.path + ".work",
         "entry\t" + entry_rel,
         "stdout\t" + output.path,
     ]
@@ -380,7 +383,6 @@ def _lean_emit_impl(ctx):
     lines.append(_forbid_sorry_line(ctx))
     lines += _dep_manifest_lines(dep_files, dep_marker_dirs, consumer_tops)
 
-    manifest = ctx.actions.declare_file(name + ".topo_manifest")
     ctx.actions.write(output = manifest, content = "\n".join(lines) + "\n")
 
     ctx.actions.run(
@@ -517,6 +519,7 @@ def lean_regen_test(name, srcs, entry, expected, out = None, deps = None, data =
 def _lean_main_test_impl(ctx):
     tc = ctx.toolchains["@rules_lean//lean:toolchain_type"].leantc
     name = ctx.label.name
+    manifest = ctx.actions.declare_file(name + ".topo_manifest")
 
     rel_paths = []
     entry_rel = None
@@ -552,7 +555,7 @@ def _lean_main_test_impl(ctx):
     marker = ctx.actions.declare_file(name + ".run_ok")
     lines = [
         "lean\t" + tc.lean.path,
-        "work\t" + name + ".topo_work",
+        "work\t" + manifest.path + ".work",
         "entry\t" + entry_rel,
         "marker\t" + marker.path,
     ]
@@ -564,7 +567,6 @@ def _lean_main_test_impl(ctx):
     lines.append(_forbid_sorry_line(ctx))
     lines += _dep_manifest_lines(dep_files, dep_marker_dirs, consumer_tops)
 
-    manifest = ctx.actions.declare_file(name + ".topo_manifest")
     ctx.actions.write(output = manifest, content = "\n".join(lines) + "\n")
     ctx.actions.run(
         executable = tc.lean,
@@ -626,6 +628,7 @@ _MARKER_NAME = ".lean_root"
 def _lean_library_impl(ctx):
     tc = ctx.toolchains["@rules_lean//lean:toolchain_type"].leantc
     name = ctx.label.name
+    manifest = ctx.actions.declare_file(name + ".topo_manifest")
     root_dir = name + "_lib"
 
     dep_markers, dep_files = _collect_dep_lean_info(ctx.attr.deps)
@@ -648,7 +651,7 @@ def _lean_library_impl(ctx):
     # Build the topo-compile driver manifest (see lean/private/topo_compile.lean).
     lines = [
         "lean\t" + tc.lean.path,
-        "work\t" + name + ".topo_work",
+        "work\t" + manifest.path + ".work",
         "marker\t" + marker.path,
     ]
     for src, rel, olean in units:
@@ -659,7 +662,6 @@ def _lean_library_impl(ctx):
     lines.append(_forbid_sorry_line(ctx))
     lines += _dep_manifest_lines(dep_files, dep_marker_dirs, consumer_tops)
 
-    manifest = ctx.actions.declare_file(name + ".topo_manifest")
     ctx.actions.write(output = manifest, content = "\n".join(lines) + "\n")
 
     own_files = [olean for (_, _, olean) in units] + [marker]
@@ -718,6 +720,7 @@ lean_library = rule(
 def _lean_binary_impl(ctx):
     tc = ctx.toolchains["@rules_lean//lean:toolchain_type"].leantc
     name = ctx.label.name
+    manifest = ctx.actions.declare_file(name + ".topo_manifest")
     root_dir = name + "_bin"
 
     entry_rel = None
@@ -743,7 +746,7 @@ def _lean_binary_impl(ctx):
     marker = ctx.actions.declare_file("{}/{}".format(root_dir, _MARKER_NAME))
     lines = [
         "lean\t" + tc.lean.path,
-        "work\t" + name + ".topo_work",
+        "work\t" + manifest.path + ".work",
         "marker\t" + marker.path,
     ]
     for src, rel, olean in units:
@@ -753,7 +756,6 @@ def _lean_binary_impl(ctx):
     lines.append(_forbid_sorry_line(ctx))
     lines += _dep_manifest_lines(dep_files, dep_marker_dirs, consumer_tops)
 
-    manifest = ctx.actions.declare_file(name + ".topo_manifest")
     ctx.actions.write(output = manifest, content = "\n".join(lines) + "\n")
     own_oleans = [olean for (_, _, olean) in units]
     ctx.actions.run(
@@ -1023,6 +1025,7 @@ def _render_audit_module(imports, theorems, allowed):
 def _lean_axiom_test_impl(ctx):
     tc = ctx.toolchains["@rules_lean//lean:toolchain_type"].leantc
     name = ctx.label.name
+    manifest = ctx.actions.declare_file(name + ".topo_manifest")
 
     if not ctx.attr.theorems:
         fail("lean_axiom_test: `theorems` is empty — the target would assert nothing " +
@@ -1066,7 +1069,7 @@ def _lean_axiom_test_impl(ctx):
     marker = ctx.actions.declare_file(name + ".axioms_ok")
     lines = [
         "lean\t" + tc.lean.path,
-        "work\t" + name + ".topo_work",
+        "work\t" + manifest.path + ".work",
         "marker\t" + marker.path,
     ]
     for src, rel in rel_paths:
@@ -1082,7 +1085,6 @@ def _lean_axiom_test_impl(ctx):
     lines.append(_forbid_sorry_line(ctx))
     lines += _dep_manifest_lines(dep_files, dep_marker_dirs, consumer_tops)
 
-    manifest = ctx.actions.declare_file(name + ".topo_manifest")
     ctx.actions.write(output = manifest, content = "\n".join(lines) + "\n")
     ctx.actions.run(
         executable = tc.lean,

@@ -1,0 +1,17 @@
+load("@bazel_skylib//rules:diff_test.bzl", "diff_test")
+load("@rules_lean//lean:lean.bzl", "lean_emit")
+
+# Both packages deliberately use the same target and module names. Under local
+# execution they must not share staged sources or compiled modules.
+lean_emit(
+    name = "same",
+    srcs = ["Main.lean"],
+    out = "actual.txt",
+    entry = "Main.lean",
+)
+
+diff_test(
+    name = "isolation_test",
+    file1 = "expected.txt",
+    file2 = ":same",
+)
