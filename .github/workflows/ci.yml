@@ -81,6 +81,8 @@ jobs:
           # consumed by a target rooted at `App/`. Lean does not fall through
           # LEAN_PATH roots, so this fails unless the shared namespace is staged.
           bazel test //examples/shared_namespace/... --test_output=errors
+          # Same target/module names must remain isolated without sandboxing.
+          bazel test //examples/action_scratch/... --spawn_strategy=local --jobs=2 --test_output=errors
 
   # The proof gates, and — the part that matters — their FAILURE paths.
   #
