@@ -1,4 +1,5 @@
-load("@rules_lean//lean:lean.bzl", "lean_library", "lean_test")
+load("@rules_lean//lean:lean.bzl", "lean_binary", "lean_library", "lean_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 # Regression test for LEAN_PATH namespace resolution.
 #
@@ -34,4 +35,29 @@ lean_test(
         ":pg_catalog",
         ":pg_query",
     ],
+)
+
+# Run the executable as well as compiling it: its own App root must retain
+# App.Bridge and the transitive Pg roots when invoked from runfiles.
+lean_library(
+    name = "bridge",
+    srcs = ["App/Bridge.lean"],
+    deps = [
+        ":pg_catalog",
+        ":pg_query",
+    ],
+)
+
+lean_binary(
+    name = "runtime",
+    srcs = ["App/Runtime.lean"],
+    entry = "App/Runtime.lean",
+    deps = [":bridge"],
+)
+
+sh_test(
+    name = "runtime_dependency_closure_test",
+    srcs = ["runtime_check.sh"],
+    args = ["$(location :runtime)"],
+    data = [":runtime"],
 )
