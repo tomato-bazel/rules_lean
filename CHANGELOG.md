@@ -4,6 +4,14 @@ All notable changes to rules_lean. The format is loosely
 [Keep a Changelog](https://keepachangelog.com/) — version headers
 mirror the published bazel-registry entries.
 
+## Unreleased
+
+`lake_workspace` gives each workspace its own Mathlib cache directory
+(`MATHLIB_CACHE_DIR`) instead of the shared `~/.cache/mathlib`. Two Mathlib
+workspaces fetched concurrently on a cold machine both ran `lake exe cache get`
+against that one directory, and failed with `curl.cfg` missing or with
+`leantar` decompression errors as each deleted or overwrote the other's files.
+
 ## 0.7.0 — a `sorry` was a GREEN, SILENT build; and axioms are now a gate
 
 Two failures in the same place, found by trying to put citizen-sh/soma's six
