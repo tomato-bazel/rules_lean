@@ -790,7 +790,23 @@ exec env LEAN_PATH="$rf/$ws/{root}" "$rf/{lean}" --run "$rf/$ws/{entry}" "$@"
 """.format(ws = ctx.workspace_name, root = root_rf, lean = lean_rf, entry = entry_src.short_path),
     )
 
+    # lean --run sees this binary's root, so stage the full compiled dependency
+    # closure there as well. Keep own modules authoritative when namespaces overlap.
+    own_modules = {rel[:-len(".lean")] + ".olean": True for (_, rel, _) in units}
+    runtime_links = {}
+    for file in dep_files.to_list():
+        if not file.path.endswith(".olean"):
+            continue
+        for dep_root in dep_marker_dirs:
+            prefix = dep_root + "/"
+            if file.path.startswith(prefix):
+                rel = file.path[len(prefix):]
+                link = root_rf + "/" + rel
+                if rel not in own_modules and link not in runtime_links:
+                    runtime_links[link] = file
+                break
     runfiles = ctx.runfiles(
+        symlinks = runtime_links,
         files = own_oleans + [marker, entry_src, tc.lean],
         transitive_files = depset(transitive = [tc.runtime, dep_files]),
     )
