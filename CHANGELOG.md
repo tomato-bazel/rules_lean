@@ -4,7 +4,7 @@ All notable changes to rules_lean. The format is loosely
 [Keep a Changelog](https://keepachangelog.com/) — version headers
 mirror the published bazel-registry entries.
 
-## Unreleased
+## 0.7.2 — isolate each workspace's Mathlib cache
 
 `lake_workspace` gives each workspace its own Mathlib cache directory
 (`MATHLIB_CACHE_DIR`) instead of the shared `~/.cache/mathlib`. Two Mathlib
