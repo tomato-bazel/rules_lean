@@ -15,14 +15,14 @@ each consumer to self-host a multi-gigabyte olean tarball.
 Add the registry to your `.bazelrc`:
 
 ```
-common --registry=https://registry.fastverk.com/
+common --registry=https://registry.tbzl.dev/
 common --registry=https://bcr.bazel.build/
 ```
 
 In your `MODULE.bazel`:
 
 ```python
-bazel_dep(name = "rules_lean", version = "0.3.0")
+bazel_dep(name = "rules_lean", version = "0.7.1")
 
 lake = use_extension("@rules_lean//lean:lake.bzl", "lake")
 lake.workspace(
@@ -191,6 +191,13 @@ but unavoidable for custom deps.
   [`lean/private/known_lean_versions.bzl`](lean/private/known_lean_versions.bzl)
   (compute with `curl -fsSL <url> | shasum -a 256`).
 - **Platforms**: darwin_aarch64, darwin_x86_64, linux_x86_64, linux_aarch64.
+
+## Executable dependencies
+
+A `lean_binary` retains its declared compiled dependency closure in its runtime
+import root. This includes transitive libraries and modules sharing a top-level
+namespace with the executable. Downstream consumers receive this behavior from
+the published rule; they do not need a root-only module override.
 
 ## Contributing
 
